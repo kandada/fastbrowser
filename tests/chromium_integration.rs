@@ -65,7 +65,7 @@ fn reset_browser(ws: &str) {
 fn write_fixture(dir: &std::path::Path) -> String {
     let file = dir.join("fixture.html");
     std::fs::write(&file, HTML).unwrap();
-    format!("file://{}", file.display())
+    common::file_url(&file)
 }
 
 /// 迷你 HTTP 服务器：对任意路径返回 `body`，用于验证真实 cookie/上下文隔离。

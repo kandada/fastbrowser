@@ -42,6 +42,20 @@ pub fn marker_user_data_dir(base: &std::path::Path) -> PathBuf {
     p
 }
 
+/// Build a `file://` URL from a local path, valid on both Unix and Windows:
+/// forward slashes plus a leading slash (Windows `C:\x` → `file:///C:/x`,
+/// Unix `/tmp/x` → `file:///tmp/x`). Chrome normalizes to this form, so tests
+/// must compare against it (a raw `path.display()` gives `file://C:\x`).
+pub fn file_url(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy().replace('\\', "/");
+    let s = if s.starts_with('/') {
+        s
+    } else {
+        format!("/{s}")
+    };
+    format!("file://{s}")
+}
+
 /// 收割测试遗留的孤儿 Chrome 进程（命令行含 `fastbrowser-test-chrome` 标记）。
 /// 仅在**进程启动时**（`shared_browser` 首次初始化）调用一次——此时本进程尚无
 /// 并发测试 Chrome，杀掉的一定是上次崩溃遗留的真孤儿，绝无误杀。

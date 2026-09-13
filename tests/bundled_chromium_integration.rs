@@ -45,7 +45,7 @@ fn bundled_chromium_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("fixture.html");
     std::fs::write(&file, HTML).unwrap();
-    let url = format!("file://{}", file.display());
+    let url = common::file_url(&file);
 
     let sdk = Fastbrowser::new();
     let cfg = Config {

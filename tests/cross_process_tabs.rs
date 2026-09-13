@@ -42,7 +42,7 @@ fn file_url(dir: &std::path::Path, name: &str, title: &str) -> String {
         format!("<!doctype html><title>{title}</title><h1>{title}</h1>"),
     )
     .unwrap();
-    format!("file://{}", p.display())
+    common::file_url(&p)
 }
 
 fn setup(headless: bool) -> Option<(&'static common::SharedBrowser, common::BrowserGuard)> {
