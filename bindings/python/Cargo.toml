@@ -1,0 +1,21 @@
+[package]
+name = "fastbrowser-py"
+version = "0.1.3"
+edition = "2021"
+license = "Apache-2.0"
+description = "Python bindings (PyO3) for the fastbrowser browser-automation kernel"
+authors = ["xiefujin <490021684@qq.com>"]
+repository = "https://github.com/kandada/fastbrowser"
+readme = "README.md"
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+# `version` keeps the crate publishable-ready; `path` builds the wheel from the
+# kernel source in the same repo (`fastbrowser/` at the repository root).
+fastbrowser = { version = "0.1.3", path = "../..", features = ["engine-cdp"] }
+pyo3 = { version = "0.23", features = ["abi3-py38"] }
+serde_json = "1"
+base64 = "0.22"

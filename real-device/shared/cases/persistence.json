@@ -1,0 +1,38 @@
+{
+  "cases": [
+    {
+      "id": "persist.session_roundtrip",
+      "category": "persistence",
+      "description": "会话持久化：cookie+storage → session_save → 重启 → session_load 恢复",
+      "engines": ["mock", "chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/login"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "tool", "name": "cookie_set", "params": {"name": "fb_rd_cookie", "value": "jar", "domain": {"$var": "base_host"}}},
+        {"action": "tool", "name": "storage_set", "params": {"key": "fb_rd_token", "value": "tok"}},
+        {"action": "tool", "name": "cookie_get", "params": {"domain": {"$var": "base_host"}}, "expect": {"cookies": {"is_array": true}}},
+        {"action": "session_save", "path": {"$var": "session_path"}},
+        {"action": "reset"},
+        {"action": "session_load", "path": {"$var": "session_path"}},
+        {"action": "open", "params": {"url": "{{BASE}}/login"}},
+        {"action": "tool", "name": "cookie_get", "params": {"domain": {"$var": "base_host"}}, "expect": {"cookies": {"is_array": true}}},
+        {"action": "tool", "name": "storage_get", "params": {"key": "fb_rd_token"}, "expect": {"value": "tok"}}
+      ]
+    },
+    {
+      "id": "persist.clear_state_isolates",
+      "category": "persistence",
+      "description": "任务隔离：clear_state 关闭多余标签并清 cookie/storage",
+      "engines": ["mock", "chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/login"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "tool", "name": "new_tab", "params": {"url": "{{BASE}}/search"}},
+        {"action": "tool", "name": "cookie_set", "params": {"name": "x", "value": "y", "domain": {"$var": "base_host"}}},
+        {"action": "clear_state", "params": {}},
+        {"action": "tool", "name": "list_tabs", "params": {}, "expect": {"tabs": {"len_gte": 1}}},
+        {"action": "tool", "name": "cookie_get", "params": {}, "expect": {"cookies": {"len_gte": 0}}}
+      ]
+    }
+  ]
+}

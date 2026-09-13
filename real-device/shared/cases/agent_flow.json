@@ -1,0 +1,48 @@
+{
+  "cases": [
+    {
+      "id": "agent.login_form",
+      "category": "agent_flow",
+      "description": "Agent 登录链路：填用户名/密码 → 校验 → 点链接导航",
+      "engines": ["mock", "chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/login"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "find", "var": "user", "match": {"tag": "input", "name": "username"}},
+        {"action": "find", "var": "pass", "match": {"tag": "input", "name": "password"}},
+        {"action": "tool", "name": "type", "params": {"id": {"$var": "user"}, "text": "alice", "tab": {"$var": "current_tab"}}},
+        {"action": "tool", "name": "type", "params": {"id": {"$var": "pass"}, "text": "s3cret", "tab": {"$var": "current_tab"}}},
+        {"action": "tool", "name": "get_element_info", "params": {"id": {"$var": "user"}}, "expect": {"value": "alice"}},
+        {"action": "tool", "name": "get_element_info", "params": {"id": {"$var": "pass"}}, "expect": {"value": "s3cret"}}
+      ]
+    },
+    {
+      "id": "agent.extract",
+      "category": "agent_flow",
+      "description": "内容提取：文本/链接/表格/选择器",
+      "engines": ["mock", "chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "tool", "name": "extract_text", "params": {}, "expect": {"text": {"contains": "FastBrowser"}}},
+        {"action": "tool", "name": "extract_links", "params": {}, "expect": {"links": {"len_gte": 1}}},
+        {"action": "tool", "name": "extract_table", "params": {}, "expect": {"table": {"len_gte": 1}}},
+        {"action": "find", "var": "home_input", "match": {"tag": "input"}}
+      ]
+    },
+    {
+      "id": "agent.click_link_navigates",
+      "category": "agent_flow",
+      "description": "点击链接导航（mock 与真实浏览器均支持）",
+      "engines": ["mock", "chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/login"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "find", "var": "reg", "match": {"tag": "a", "text": "Register"}},
+        {"action": "tool", "name": "click", "params": {"id": {"$var": "reg"}, "tab": {"$var": "current_tab"}}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "tool", "name": "get_current_url", "params": {}, "expect": {"url": {"contains": "register"}}}
+      ]
+    }
+  ]
+}

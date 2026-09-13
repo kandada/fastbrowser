@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "id": "multi.tabs_lifecycle",
+      "category": "multi_tab",
+      "description": "多标签：开两个标签 → 列表 → 按 tab 精确读 URL → 切换 → 关闭",
+      "engines": ["mock", "chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "tool", "name": "new_tab", "params": {"url": "{{BASE}}/two"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "tool", "name": "list_tabs", "params": {}, "expect": {"tabs": {"len_gte": 2}}},
+        {"action": "tool", "name": "get_current_url", "params": {"tab": {"$var": "current_tab"}}, "expect": {"url": {"contains": "two"}}},
+        {"action": "tool", "name": "switch_tab", "params": {"tab": {"$var": "tab1"}}},
+        {"action": "tool", "name": "get_current_url", "params": {}, "expect": {"url": {"contains": "/"}}},
+        {"action": "tool", "name": "close_tab", "params": {"tab": {"$var": "current_tab"}}}
+      ]
+    },
+    {
+      "id": "multi.tab_param_routing",
+      "category": "multi_tab",
+      "description": "工具 tab 参数路由：活动标签为 A 时仍能操作标签 B（跨标签并发的前提）",
+      "engines": ["mock", "chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/login"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "tool", "name": "new_tab", "params": {"url": "{{BASE}}/search"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "find", "var": "b_user", "match": {"tag": "input", "name": "username"}, "tab": {"$var": "tab1"}},
+        {"action": "tool", "name": "type", "params": {"id": {"$var": "b_user"}, "text": "beta", "tab": {"$var": "tab1"}}},
+        {"action": "tool", "name": "get_element_info", "params": {"id": {"$var": "b_user"}, "tab": {"$var": "tab1"}}, "expect": {"value": "beta"}},
+        {"action": "tool", "name": "get_current_url", "params": {"tab": {"$var": "tab1"}}, "expect": {"url": {"contains": "login"}}}
+      ]
+    }
+  ]
+}

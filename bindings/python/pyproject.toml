@@ -1,0 +1,40 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fastbrowser"
+version = "0.1.3"
+description = "Python bindings for the fastbrowser browser-automation kernel (PyO3)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "Apache-2.0"
+authors = [{ name = "xiefujin", email = "490021684@qq.com" }]
+keywords = ["browser", "automation", "ai-agent", "cdp", "webview", "agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Software Development :: Libraries",
+]
+urls = { Repository = "https://github.com/kandada/fastbrowser", Changelog = "https://github.com/kandada/fastbrowser/blob/main/bindings/python/CHANGELOG.md" }
+
+[tool.maturin]
+python-source = "python"
+module-name = "fastbrowser._core"
+features = ["pyo3/extension-module"]
+strip = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

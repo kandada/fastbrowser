@@ -1,0 +1,7 @@
+.DS_Store
+real-device/shared/runner/runner-*.json
+real-device/android/app/app/src/main/jniLibs/
+real-device/android/app/build/
+real-device/android/app/app/build/
+real-device/android/app/.gradle/
+real-device/ios/FastbrowserDeviceTests/.build/

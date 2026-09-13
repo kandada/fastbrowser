@@ -1,0 +1,14 @@
+target/
+.DS_Store
+__pycache__/
+*.py[cod]
+*.so
+*.dylib
+*.dll
+dist/
+build/
+.venv*/
+.test-tmp/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/

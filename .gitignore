@@ -1,0 +1,32 @@
+# Build / packaging artifacts and vendored browsers (self-contained, repo-local)
+/target/
+/dist/
+/c_dist/
+/vendor/
+
+*.rs.bk
+.DS_Store
+.idea/
+# Python 绑定产物
+__pycache__/
+*.pyc
+.pytest_cache/
+.benchmarks/
+bindings/python/*.egg-info/
+bindings/python/dist/
+bindings/python/build/
+bindings/python/target/
+bindings/python/.venv*/
+bindings/python/.pytest_cache/
+bindings/python/.mypy_cache/
+bindings/python/python/**/*.so
+# Node 绑定产物
+bindings/node/node_modules/
+bindings/node/build/
+bindings/node/*.node
+# Swift 绑定产物
+bindings/swift/.build/
+# Go 绑定产物
+bindings/go/*.test
+# 本地日志
+*.log

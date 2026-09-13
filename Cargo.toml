@@ -1,0 +1,81 @@
+[package]
+name = "fastbrowser"
+version = "0.1.3"
+edition = "2021"
+description = "Cross-platform browser automation kernel for AI agents"
+license = "Apache-2.0"
+authors = ["xiefujin <490021684@qq.com>"]
+repository = "https://github.com/kandada/fastbrowser"
+readme = "README.md"
+keywords = ["browser", "automation", "ai-agent", "cdp", "webview"]
+categories = ["command-line-utilities", "development-tools"]
+# Ship only the Rust kernel (+ docs/examples/benches/tests). Keep other-language
+# bindings, the C-ABI sources, device runners, scripts, and the alternate
+# manifest out of the crates.io archive.
+exclude = [
+    "bindings/",
+    "real-device/",
+    "fastbrowser_c/",
+    "scripts/",
+    ".github/",
+    "Cargo_min.toml",
+]
+
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "fastbrowser"
+path = "src/bin/main.rs"
+
+[features]
+default = ["engine-mock"]
+# 内存参考引擎（无外部依赖，CLI/测试/文档示例开箱即用）
+engine-mock = []
+# 共享 CDP 客户端（websocket），被 cef 引擎复用，也可独立使用
+engine-cdp = [
+    "dep:tokio",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:async-trait",
+]
+# 异步壳（AsyncFastbrowser）：async 工具调用 + 每标签事件推送 + 多标签编排/并发。
+# For async hosts and the async-agent ecosystem; the sync shell (C ABI/CLI) is unaffected.
+async-core = ["dep:tokio"]
+# 桌面端 CEF 引擎（需要 scripts/fetch-cef.sh 拉取预编译包到 vendor/cef/）
+engine-cef = ["dep:cef", "engine-cdp"]
+# 移动端系统 WebView 引擎（宿主提供 WebViewOps，经 sdk::plugin 注册）
+engine-webview = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+flate2 = "1.1"   # 极简 PNG 解码器（IDAT inflate）
+cef = { version = "151", optional = true } # tauri-apps/cef-rs
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "macros", "time", "sync"], optional = true }
+tokio-tungstenite = { version = "0.24", features = ["connect", "handshake"], optional = true }
+futures-util = { version = "0.3", optional = true }
+async-trait = { version = "0.1", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bench]]
+name = "snapshot"
+harness = false
+path = "benches/snapshot.rs"
+
+[[bench]]
+name = "perf"
+harness = false
+path = "benches/perf.rs"
+
+# Release profile tuned for the Android staticlib (对齐 fastshell 根 workspace):
+# LTO strips dead code across crates, single codegen unit improves both size and
+# speed, symbol stripping trims the archive. Panics stay unwinding so a failing
+# tool call cannot take down the host app.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

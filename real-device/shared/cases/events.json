@@ -1,0 +1,42 @@
+{
+  "cases": [
+    {
+      "id": "events.navigation",
+      "category": "events",
+      "description": "等待导航完成（wait_for_navigation）",
+      "engines": ["mock", "chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "navigate", "params": {"url": "{{BASE}}/three"}},
+        {"action": "wait_navigation", "timeout_ms": 15000},
+        {"action": "tool", "name": "get_current_url", "params": {}, "expect": {"url": {"contains": "three"}}}
+      ]
+    },
+    {
+      "id": "events.load_state",
+      "category": "events",
+      "description": "等待页面 readyState（load/domcontentloaded）",
+      "engines": ["mock", "chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/search"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "tool", "name": "get_page_title", "params": {}, "expect": {"title": {"contains": "Search"}}}
+      ]
+    },
+    {
+      "id": "events.dialog",
+      "category": "events",
+      "description": "JS 对话框捕获与接受（页面 setTimeout alert）",
+      "engines": ["chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/dialog"}},
+        {"action": "sleep", "ms": 700},
+        {"action": "tool", "name": "pending_dialog", "params": {}, "expect": {"dialog": {"is_object": true}}},
+        {"action": "tool", "name": "dialog_accept", "params": {}},
+        {"action": "sleep", "ms": 200},
+        {"action": "tool", "name": "pending_dialog", "params": {}, "expect": {"dialog": {"is_null": true}}}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+# 编译产物固定到外部盘 fastbrowser_local（内置盘空间有限）
+[build]
+target-dir = "../../../../target"

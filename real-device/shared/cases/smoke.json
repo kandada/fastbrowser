@@ -1,0 +1,52 @@
+{
+  "cases": [
+    {
+      "id": "smoke.basic",
+      "category": "smoke",
+      "description": "打开页面 → 等待加载 → 快照含输入框 → 标题/URL/截图",
+      "engines": ["mock", "chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/login"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "tool", "name": "get_page_title", "params": {}, "expect": {"title": {"contains": "Login"}}},
+        {"action": "tool", "name": "get_current_url", "params": {}, "expect": {"url": {"contains": "login"}}},
+        {"action": "find", "var": "user", "match": {"tag": "input", "name": "username"}},
+        {"action": "tool", "name": "screenshot", "params": {}, "expect": {"width": {"gte": 1}}}
+      ]
+    },
+    {
+      "id": "smoke.nav",
+      "category": "smoke",
+      "description": "导航 → 后退 → 前进（历史精确）",
+      "engines": ["mock", "chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "navigate", "params": {"url": "{{BASE}}/login"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "tool", "name": "get_current_url", "params": {}, "expect": {"url": {"contains": "login"}}},
+        {"action": "tool", "name": "back", "params": {}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "tool", "name": "get_current_url", "params": {}, "expect": {"url": {"contains": "/"}}},
+        {"action": "tool", "name": "forward", "params": {}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "tool", "name": "get_current_url", "params": {}, "expect": {"url": {"contains": "login"}}}
+      ]
+    },
+    {
+      "id": "smoke.type_click",
+      "category": "smoke",
+      "description": "真实键盘输入 + 元素点击",
+      "engines": ["mock", "chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/login"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "find", "var": "user", "match": {"tag": "input", "name": "username"}},
+        {"action": "tool", "name": "type", "params": {"id": {"$var": "user"}, "text": "alice", "tab": {"$var": "current_tab"}}},
+        {"action": "tool", "name": "get_element_info", "params": {"id": {"$var": "user"}}, "expect": {"value": "alice"}},
+        {"action": "find", "var": "go", "match": {"tag": "button", "text": "Submit"}},
+        {"action": "tool", "name": "click", "params": {"id": {"$var": "go"}, "tab": {"$var": "current_tab"}}}
+      ]
+    }
+  ]
+}

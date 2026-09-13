@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "id": "perf.snapshot_stability",
+      "category": "perf",
+      "description": "连续 10 次快照耗时（报告平均值；宽松上限仅防明显退化）",
+      "engines": ["mock", "chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/search"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "benchmark", "tool": "snapshot", "params": {}, "iterations": 10, "expect_avg_ms": 3000}
+      ]
+    },
+    {
+      "id": "perf.screenshot_stability",
+      "category": "perf",
+      "description": "连续 5 次截图耗时（报告平均值；宽松上限）",
+      "engines": ["mock", "chromium", "webview"],
+      "steps": [
+        {"action": "open", "params": {"url": "{{BASE}}/"}},
+        {"action": "wait_load", "state": "load", "timeout_ms": 15000},
+        {"action": "benchmark", "tool": "screenshot", "params": {}, "iterations": 5, "expect_avg_ms": 5000}
+      ]
+    }
+  ]
+}

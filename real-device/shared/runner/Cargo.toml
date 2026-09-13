@@ -1,0 +1,17 @@
+[package]
+name = "fb-realdevice-runner"
+version = "0.1.0"
+edition = "2021"
+description = "fastbrowser 真机测试参考 runner（桌面 mock/chromium 跑同一套 JSON 用例）"
+
+[features]
+default = ["engine-mock"]
+engine-mock = ["fastbrowser/engine-mock"]
+engine-cdp = ["fastbrowser/engine-cdp"]
+engine-webview = ["fastbrowser/engine-webview"]
+
+[dependencies]
+fastbrowser = { path = "../../..", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"

@@ -1,0 +1,12 @@
+{
+  "name": "fastbrowser-node",
+  "version": "0.1.0",
+  "description": "Node.js binding for the fastbrowser browser-automation kernel (N-API over C ABI)",
+  "main": "index.js",
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "test": "node test.js"
+  },
+  "license": "Apache-2.0",
+  "gypfile": true
+}
