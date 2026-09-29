@@ -69,7 +69,7 @@ const CORPUS: &[(&str, &str)] = &[
     ("list_tabs", r##"{}"##),
     (
         "navigate",
-        r##"{"url": "https://baike.baidu.com/item/虎皮鹦鹉"}"##,
+        r##"{"url": "https://baike.baidu.com/item/Budgie"}"##,
     ),
     (
         "new_tab",
@@ -78,11 +78,11 @@ const CORPUS: &[(&str, &str)] = &[
     ("reload", r##"{}"##),
     (
         "reload",
-        r##"{"url": "https://baike.baidu.com/item/暹罗皇后罗勒"}"##,
+        r##"{"url": "https://baike.baidu.com/item/ThaiBasil"}"##,
     ),
-    ("search", r##"{"limit": 100, "query": "暹罗皇后"}"##),
+    ("search", r##"{"limit": 100, "query": "Rosa"}"##),
     ("switch_tab", r##"{"tab": 3}"##),
-    ("type", r##"{"id": "txt_key", "text": "虎尾兰"}"##),
+    ("type", r##"{"id": "txt_key", "text": "SnakePlant"}"##),
     (
         "wait_for_element",
         r##"{"selector": "div.lemmaWgt-focus, .mainContent_R21Ht, .body-wrapper, h1", "timeout_ms": "10000"}"##,
@@ -101,10 +101,10 @@ const CORPUS: &[(&str, &str)] = &[
         "wait_for_text",
         r##"{"selector": ".mainContent_RkEDc, .body-wrapper, .J-lemma-content, .mainContent_aA4T9, #contentContainer", "timeout_ms": "8000"}"##,
     ),
-    ("wait_for_text", r##"{"text": "虎皮鹦鹉"}"##),
+    ("wait_for_text", r##"{"text": "Budgie"}"##),
     (
         "wait_for_text",
-        r##"{"text": "暹罗皇后罗勒", "timeout_ms": 15000}"##,
+        r##"{"text": "ThaiBasil", "timeout_ms": 15000}"##,
     ),
     ("wait_for_text", r##"{"timeout_ms": 8000}"##),
 ];

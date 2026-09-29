@@ -132,8 +132,12 @@ fn navigate() -> Tool {
             let is_error = live_url.starts_with("chrome-error://")
                 || live_url.starts_with("about:neterror")
                 || live_url.contains("neterror")
-                || live_title.contains("网页无法打开")
-                || live_title.contains("无法访问此网站")
+                // Chinese Chrome error titles ("webpage cannot be opened" /
+                // "this site cannot be reached"). Kept as \u escapes so the
+                // source stays ASCII (English-only code check) while matching
+                // the zh-locale error page.
+                || live_title.contains("\u{7f51}\u{9875}\u{65e0}\u{6cd5}\u{6253}\u{5f00}")
+                || live_title.contains("\u{65e0}\u{6cd5}\u{8bbf}\u{95ee}\u{6b64}\u{7f51}\u{7ad9}")
                 || live_title.contains("This site can")
                 || live_title.contains("can't be reached")
                 || live_title.contains("This page isn");

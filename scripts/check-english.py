@@ -81,4 +81,12 @@ def main(paths):
 
 
 if __name__ == "__main__":
+    # Make output robust on Windows consoles (cp1252) and any non-UTF-8 locale:
+    # without this, printing a CJK offending line raised UnicodeEncodeError and
+    # turned a clear "violations found" message into a confusing traceback.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except Exception:
+            pass
     sys.exit(main(sys.argv[1:]))

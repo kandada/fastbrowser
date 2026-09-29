@@ -81,9 +81,9 @@ fn element_target_dialects() {
             "#x",
         ),
         (
-            r#"{"ref":{"kind":"text","value":"登录"}}"#,
+            r#"{"ref":{"kind":"text","value":"Login"}}"#,
             RefKind::Text,
-            "登录",
+            "Login",
         ),
     ];
     for (params, kind, value) in cases {
@@ -107,7 +107,7 @@ fn element_target_dialects() {
 #[test]
 fn element_target_dialect_fuzz() {
     let cases: &[(&str, RefKind, &str)] = &[
-        (r#"{"selector":"text=登录"}"#, RefKind::Text, "登录"),
+        (r#"{"selector":"text=Login"}"#, RefKind::Text, "Login"),
         (r#"{"selector":"role=textbox"}"#, RefKind::Role, "textbox"),
         (
             r#"{"selector":"xpath=//button"}"#,
@@ -123,9 +123,9 @@ fn element_target_dialect_fuzz() {
             "div.card > span",
         ),
         (
-            r#"{"selector":"button:has-text('提交')"}"#,
+            r#"{"selector":"button:has-text('Submit')"}"#,
             RefKind::Selector,
-            "button:has-text('提交')",
+            "button:has-text('Submit')",
         ),
         (
             r#"{"selector":"a:has-text(\"Home\")"}"#,

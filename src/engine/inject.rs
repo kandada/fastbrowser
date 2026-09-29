@@ -973,7 +973,7 @@ mod tests {
 
     #[test]
     fn element_exists_js_uses_shared_engine() {
-        let js = element_exists_js("role=button[name=\"搜索\"]");
+        let js = element_exists_js("role=button[name=\"Search\"]");
         assert!(js.contains("window.__fbQuery"), "routes through __fbQuery");
         assert!(js.contains("role=button[name="), "selector passed through");
     }
