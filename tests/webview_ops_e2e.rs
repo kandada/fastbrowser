@@ -75,6 +75,13 @@ impl MockOps {
     fn evaluate_inner(&self, handle: u64, script: &str) -> Result<Value> {
         let st = self.tab(handle)?;
         let t = st.get(&handle).unwrap();
+        // Accessibility tree built by `inject::accessibility_js` (must precede
+        // the generic `document.body`/`innerText` branch below).
+        if script.contains("aria-labelledby") && script.contains("truncated") {
+            return Ok(json!(
+                r#"{"root":{"role":"document","name":"","children":[{"role":"heading","name":"Hi"},{"role":"link","name":"Go"}]},"count":3,"truncated":false}"#
+            ));
+        }
         if script.contains("FB_EXTRACT_V3") {
             return Ok(json!(snapshot_json(&t.title, &t.url)));
         }
@@ -89,6 +96,23 @@ impl MockOps {
         }
         if script.contains("document.images") {
             return Ok(json!([]));
+        }
+        // Live links (the get_links JS) — deliberately DIFFERENT from the cached
+        // snapshot so the test proves the live DOM path is used.
+        if script.contains("querySelectorAll('a[href]')") {
+            return Ok(json!([{"url": "https://live.example/x", "text": "Live Link"}]));
+        }
+        // Live element resolution (CSS/XPath/text/role) → sentinel id.
+        if script.contains("kind==='css'") {
+            return Ok(json!("\u{1}"));
+        }
+        // Element info for a live-resolved (data-fb) element.
+        if script.contains("getBoundingClientRect") && script.contains("[data-fb=") {
+            return Ok(json!({
+                "tag": "button", "role": null, "text": "Go", "href": null,
+                "rect": {"x": 0.0, "y": 0.0, "width": 10.0, "height": 10.0},
+                "value": null, "input_type": null, "checked": null
+            }));
         }
         if script.contains("querySelector('table')") {
             return Ok(json!([]));
@@ -181,6 +205,49 @@ fn sdk_with_ops() -> Fastbrowser {
     };
     let _ = s.init(cfg);
     s
+}
+
+/// `get_links` must read the LIVE DOM (not the cached snapshot, which is only
+/// refreshed on create/snapshot).
+#[test]
+fn webview_accessibility_tree() {
+    let s = sdk_with_ops();
+    s.open("https://example.com/login").unwrap();
+    let v = s.tool_call("get_accessibility_tree", json!({})).unwrap();
+    assert!(v.is_object(), "{v}");
+    assert_eq!(v["count"], json!(3), "{v}");
+    assert_eq!(v["root"]["role"], json!("document"), "{v}");
+}
+
+#[test]
+fn webview_get_links_uses_live_dom() {
+    let s = sdk_with_ops();
+    s.open("https://example.com/login").unwrap();
+    let v = s.tool_call("extract_links", json!({})).unwrap();
+    let links = v["links"].as_array().cloned().unwrap_or_default();
+    assert!(
+        links
+            .iter()
+            .any(|l| l["url"] == json!("https://live.example/x")),
+        "expected live-DOM link, got {v}"
+    );
+}
+
+/// A CSS/XPath/text/role target not present in the cached snapshot refs must be
+/// resolved with a LIVE DOM query (previously only snapshot ids worked).
+#[test]
+fn webview_click_by_selector_uses_live_resolve() {
+    let s = sdk_with_ops();
+    s.open("https://example.com/login").unwrap();
+    let v = s
+        .tool_call("click", json!({"selector": "#go"}))
+        .expect("click by CSS should resolve live");
+    assert_eq!(v["ok"], json!(true), "{v}");
+    // get_element_info also falls back to live resolution.
+    let v = s
+        .tool_call("get_element_info", json!({"selector": "button.submit"}))
+        .expect("get_element_info by CSS should resolve live");
+    assert!(v.get("tag").is_some(), "{v}");
 }
 
 #[test]
@@ -338,6 +405,11 @@ fn webview_tool_list_filters_by_capability() {
     assert!(names.iter().any(|n| n == "navigate"));
     assert!(names.iter().any(|n| n == "execute_js"));
 
-    // 数量 = 全部(96) - 14
-    assert_eq!(s.tool_count(), 96 - 14);
+    // 数量与过滤后的清单一致，且数量健康（不硬编码总数，避免工具增删即失效）。
+    let total = s.tool_list().as_array().map(|a| a.len()).unwrap_or(0);
+    assert_eq!(s.tool_count(), total, "tool_count must equal filtered list");
+    assert!(
+        total >= 80,
+        "expected a healthy webview tool set, got {total}"
+    );
 }

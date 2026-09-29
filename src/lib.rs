@@ -27,6 +27,9 @@ pub mod tools;
 #[cfg(feature = "engine-cdp")]
 pub mod cdp;
 
+#[cfg(feature = "surface")]
+pub mod surfaces;
+
 #[cfg(feature = "async-core")]
 pub mod async_core;
 
@@ -36,6 +39,12 @@ pub use async_core::AsyncFastbrowser;
 pub use config::Config;
 pub use engine::{BrowserEngine, EngineError, ErrorKind};
 pub use sdk::Fastbrowser;
+
+#[cfg(feature = "surface")]
+pub use engine::{
+    ProviderRegistry, SurfaceAction, SurfaceCapabilities, SurfaceInfo, SurfaceKind,
+    SurfaceProvider, SurfaceRuntime, SurfaceSnapshot, UiNode, UiState,
+};
 
 /// 当前内核版本号。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

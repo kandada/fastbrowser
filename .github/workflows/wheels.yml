@@ -1,0 +1,179 @@
+name: Python wheels
+
+# Build cross-platform abi3 wheels for the `fastbrowser` PyPI package and
+# publish them on version tags / published releases.
+#
+# This variant targets the PUBLIC repo `kandada/fastbrowser` (free Actions
+# minutes, no private-repo billing/spending-limit dependency): the kernel crate
+# is at the repository root and the Python binding at `bindings/python`
+# (its `fastbrowser = { path = "../.." }` resolves back to the kernel).
+#
+# Publishing uses a PyPI API token stored as the `PYPI_API_TOKEN` repository
+# secret (Settings → Secrets and variables → Actions). Set it in THIS repo
+# (secrets are per-repository).
+#
+# HANDOFF: build jobs pass their wheels to the single `publish` job through
+# `actions/cache` (save / restore) instead of actions/upload-artifact +
+# actions/download-artifact — cache storage is NOT part of the account-wide
+# Actions artifact storage quota, so a full artifact quota cannot block a
+# release.
+#
+# To use PyPI Trusted Publishing (OIDC) instead of a token, add
+# `permissions: { id-token: write }` to the publish job, set
+# `environment: { name: pypi }`, drop `password`, and configure the trusted
+# publisher at https://pypi.org/manage/project/fastbrowser/settings/publishing/
+# (owner kandada, repo fastbrowser, workflow wheels.yml).
+
+on:
+  push:
+    tags: ["v*"]
+  # Publishing a Release also triggers the workflow — useful when the tag
+  # already exists (re-publishing a release does not emit a tag push event).
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Same path in every build job and in the publish job (repo root layout).
+  DIST: bindings/python/dist
+
+jobs:
+  test:
+    name: Test (bindings)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bindings/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pip install maturin pytest
+      - name: Build + install wheel
+        run: |
+          maturin build --out dist
+          pip install --force-reinstall dist/*.whl
+      - name: Pytest
+        run: pytest -q
+
+  linux:
+    name: Linux ${{ matrix.target }}
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: bindings/python
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: --release --out dist --features pyo3/extension-module,surface-linux
+        # aarch64 cross toolchain doesn't predefine the ACLE macro __ARM_ARCH,
+        # which ring's assembly requires (see bindings/python/.cargo/config.toml).
+        env:
+          CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8"
+      - uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DIST }}
+          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-linux-${{ matrix.target }}
+
+  windows:
+    name: Windows x86_64
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: bindings/python
+          target: x86_64-pc-windows-msvc
+          args: --release --out dist --features pyo3/extension-module,surface-windows
+      - uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DIST }}
+          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-windows
+
+  macos:
+    name: macOS universal2
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: bindings/python
+          target: universal2-apple-darwin
+          args: --release --out dist --features pyo3/extension-module,surface-macos
+      - uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DIST }}
+          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-macos
+
+  sdist:
+    name: sdist
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: bindings/python
+          command: sdist
+          args: --out dist
+      - uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DIST }}
+          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-sdist
+
+  publish:
+    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, linux, windows, macos, sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore wheels from cache (linux x86_64)
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DIST }}
+          fail-on-cache-miss: true
+          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-linux-x86_64-unknown-linux-gnu
+      - name: Restore wheels from cache (linux aarch64)
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DIST }}
+          fail-on-cache-miss: true
+          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-linux-aarch64-unknown-linux-gnu
+      - name: Restore wheels from cache (windows)
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DIST }}
+          fail-on-cache-miss: true
+          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-windows
+      - name: Restore wheels from cache (macos)
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DIST }}
+          fail-on-cache-miss: true
+          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-macos
+      - name: Restore sdist from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DIST }}
+          fail-on-cache-miss: true
+          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-sdist
+      - name: List restored files
+        run: ls -lR "${{ env.DIST }}"
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: ${{ env.DIST }}
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true

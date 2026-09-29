@@ -14,6 +14,58 @@ use serde_json::{json, Value};
 use crate::engine::PageEvent;
 use crate::tools::tool::Tool;
 
+/// 取该 tab 当前记录的目标 URL（`navigate`/`open` 会把它设为目标地址）。
+/// 用于判断页面是否“已经真正导航到目标”：宿主 WebView 的 `load()` 是异步的，
+/// 若只看 `document.readyState`，旧页早已 `complete` 会秒回、读到上一页内容。
+fn tab_target_url(
+    engine: &dyn crate::engine::BrowserEngine,
+    tab: crate::engine::TabId,
+) -> Option<String> {
+    engine
+        .list_tabs()
+        .into_iter()
+        .find(|t| t.id == tab)
+        .map(|t| t.url)
+        .filter(|u| !u.is_empty())
+}
+
+/// 宽松比较两个 URL 是否指向同一页面：忽略 `#fragment`、百分号编码差异与结尾 `/`。
+/// 任一侧为空则视为不可判定（返回 true，即不阻塞，保持向后兼容）。
+fn same_url(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return true;
+    }
+    fn norm(s: &str) -> String {
+        let s = s.split('#').next().unwrap_or(s);
+        let bytes = s.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    out.push(v);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out)
+            .trim_end_matches('/')
+            .to_string()
+    }
+    norm(a) == norm(b)
+}
+
+/// 读取页面当前地址；引擎不支持时返回空串（空串不参与比较）。
+fn current_href(ctx: &crate::tools::tool::ToolContext, tab: crate::engine::TabId) -> String {
+    ctx.eval_opt(tab, "location.href||''")
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default()
+}
+
 pub fn tools() -> Vec<Tool> {
     vec![
         wait_for_element(),
@@ -40,36 +92,116 @@ fn wait_for_load_state() -> Tool {
                 .param_opt::<String>("state")?
                 .unwrap_or_else(|| "load".into());
             let timeout = ctx.param_opt::<u64>("timeout_ms")?.unwrap_or(10000);
-            let mut last_ready = String::new();
-            crate::engine::wait_until(
-                ctx.runtime.engine(),
-                tab,
-                Duration::from_millis(timeout),
-                &format!("wait_for_load_state('{state}')"),
-                || {
-                    let ready = ctx
-                        .eval_opt(tab, "document.readyState||''")
-                        .and_then(|v| v.as_str().map(String::from))
-                        .unwrap_or_default();
-                    last_ready = ready.clone();
-                    let idle = if state == "networkidle" {
-                        ctx.runtime.engine().drain_events(tab).is_empty()
-                    } else {
-                        true
-                    };
-                    let reached = match state.as_str() {
-                        "networkidle" => last_ready == "complete" && idle,
-                        "domcontentloaded" => {
-                            last_ready == "interactive" || last_ready == "complete"
-                        }
-                        _ => last_ready == "complete",
-                    };
-                    Ok(reached)
-                },
-            )?;
-            Ok(json!({"state": state, "ready": last_ready}))
+            let ready = match wait_load_state(ctx, tab, &state, timeout) {
+                Ok(r) => r,
+                Err(mut e) => {
+                    if state == "networkidle" {
+                        e.message.push_str(
+                            " — 'networkidle' never settles on pages with long-polling/streams/ads; use 'load' or 'domcontentloaded'",
+                        );
+                    }
+                    return Err(e);
+                }
+            };
+            Ok(json!({"state": state, "ready": ready}))
         },
     )
+}
+
+/// 等待页面到达 `state`（`load`|`domcontentloaded`|`networkidle`），返回最终
+/// `document.readyState`。被 `wait_for_load_state` 与 `navigate(wait_until)` 共用。
+///
+/// 先确认已导航到目标 URL，否则旧页 `readyState` 已是 complete 会秒回并让后续
+/// 读取到上一页内容。
+/// Whether the wait's URL gate is satisfied.
+///
+/// The gate exists so that right after `navigate(wait_until:"none")` we do not
+/// accept the *old* page's `readyState == "complete"`. It must, however, accept
+/// server redirects / SPA canonicalisation — otherwise `location.href` never
+/// equals the requested URL and the wait times out forever (a real regression).
+///
+/// - No known target → gate open.
+/// - Already at the target at wait start (`expect_nav == false`) → only the
+///   target counts.
+/// - A navigation is pending (`start_href` ≠ target) → accept the target **or**
+///   any URL the tab has moved to (a redirect).
+fn url_gate_ok(target: Option<&str>, start_href: &str, href: &str) -> bool {
+    let Some(t) = target else {
+        return true;
+    };
+    if same_url(href, t) {
+        return true;
+    }
+    let expect_nav = !start_href.is_empty() && !same_url(start_href, t);
+    expect_nav && !same_url(href, start_href)
+}
+
+pub fn wait_load_state(
+    ctx: &crate::tools::tool::ToolContext,
+    tab: crate::engine::TabId,
+    state: &str,
+    timeout_ms: u64,
+) -> crate::engine::Result<String> {
+    let target = tab_target_url(ctx.runtime.engine(), tab);
+    // Where the tab is at the start of the wait. If it is not yet at the target
+    // a navigation is pending, and redirects are allowed (see `url_gate_ok`).
+    let start_href = current_href(ctx, tab);
+    let mut last_ready = String::new();
+    // The mobile webview host emits no navigation events and `back`/`forward`/
+    // client-side navigations leave the recorded target URL stale, so the URL
+    // gate can never pass. Once we are on a *real, fully-loaded* page that has
+    // not changed since the wait began, accept after a short grace instead of
+    // hanging until the timeout.
+    let mut settled_since: Option<std::time::Instant> = None;
+    let real_page = |u: &str| !u.is_empty() && !u.eq_ignore_ascii_case("about:blank");
+    crate::engine::wait_until(
+        ctx.runtime.engine(),
+        tab,
+        Duration::from_millis(timeout_ms),
+        &format!("wait_for_load_state('{state}')"),
+        || {
+            let href = current_href(ctx, tab);
+            let ready = ctx
+                .eval_opt(tab, "document.readyState||''")
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default();
+            last_ready = ready.clone();
+            let idle = if state == "networkidle" {
+                ctx.runtime.engine().drain_events(tab).is_empty()
+            } else {
+                true
+            };
+            let reached = match state {
+                "networkidle" => last_ready == "complete" && idle,
+                "domcontentloaded" => last_ready == "interactive" || last_ready == "complete",
+                _ => last_ready == "complete",
+            };
+            if !reached {
+                settled_since = None;
+                return Ok(false);
+            }
+            match target.as_deref() {
+                None => Ok(true),
+                Some(t) if url_gate_ok(Some(t), &start_href, &href) => Ok(true),
+                Some(_) => {
+                    // Gate says "not the target". If we are on a real page that is
+                    // exactly where the wait started (the recorded target is just
+                    // stale — e.g. after `back`), accept once it has been stable
+                    // for a short grace.
+                    if real_page(&href) && same_url(&href, &start_href) {
+                        let since = *settled_since.get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed() >= Duration::from_millis(1200) {
+                            return Ok(true);
+                        }
+                    } else {
+                        settled_since = None;
+                    }
+                    Ok(false)
+                }
+            }
+        },
+    )?;
+    Ok(last_ready)
 }
 
 fn wait_for_condition() -> Tool {
@@ -177,7 +309,7 @@ fn assert_title() -> Tool {
 fn wait_for_element() -> Tool {
     Tool::new(
         "wait_for_element",
-        "Wait until an element matching 'id' (letter) or 'selector' (css/xpath/text) appears, up to timeout_ms.",
+        "Wait until an element matching 'id' (letter) or 'selector' (css / xpath= / text= / role= / data-testid= / Playwright selectors) appears, up to timeout_ms.",
         json!({
             "id": {"type": "string", "required": false},
             "selector": {"type": "string", "required": false},
@@ -205,11 +337,8 @@ fn wait_for_element() -> Tool {
                             return Ok(true);
                         }
                     } else if let Some(sel) = &selector {
-                        // 轻量：css/tag 选择器 → querySelector；非法（如 xpath）回退快照
-                        let sel_json = serde_json::to_string(sel).unwrap_or_else(|_| "\"\"".into());
-                        let js = format!(
-                            "(function(){{try{{return !!document.querySelector({sel_json});}}catch(e){{return null;}}}})()"
-                        );
+                        // Shared selector engine → Playwright selectors work here too.
+                        let js = crate::engine::inject::element_exists_js(sel);
                         match ctx.eval_opt(tab, &js) {
                             Some(Value::Bool(true)) => return Ok(true),
                             Some(Value::Bool(false)) => {} // 尚未出现，继续等
@@ -249,26 +378,48 @@ fn wait_for_navigation() -> Tool {
         |ctx| {
             let tab = ctx.target_tab()?;
             let timeout = ctx.param_opt::<u64>("timeout_ms")?.unwrap_or(10000);
+            let target = tab_target_url(ctx.runtime.engine(), tab);
+            let start_href = current_href(ctx, tab);
+            let mut settled_since: Option<std::time::Instant> = None;
+            let real_page = |u: &str| !u.is_empty() && !u.eq_ignore_ascii_case("about:blank");
             crate::engine::wait_until(
                 ctx.runtime.engine(),
                 tab,
                 Duration::from_millis(timeout),
                 "wait_for_navigation",
                 || {
-                    // 页面已加载完成 → 视为“导航已完成”，立即返回。否则在
-                    // `open`（现已同步等到真实地址）之后，页面其实早已就绪，
-                    // 只等“未来的事件”会白等到超时（默认 10s）。
+                    let href = current_href(ctx, tab);
+                    let at_target = match target.as_deref() {
+                        None => true,
+                        Some(t) => same_url(&href, t),
+                    };
+                    // 已到目标地址：readyState 完成。
                     let ready = ctx
                         .eval_opt(tab, "document.readyState||''")
                         .and_then(|v| v.as_str().map(String::from))
                         .unwrap_or_default();
-                    if ready == "complete" {
+                    if at_target && ready == "complete" {
                         return Ok(true);
                     }
                     let evs = ctx.runtime.engine().drain_events(tab);
-                    Ok(evs
+                    if evs
                         .iter()
-                        .any(|e| matches!(e, PageEvent::NavigationCompleted { .. })))
+                        .any(|e| matches!(e, PageEvent::NavigationCompleted { .. }))
+                    {
+                        return Ok(true);
+                    }
+                    // The recorded target is stale (back/forward/client-side nav);
+                    // accept a real, fully-loaded page that has not changed since
+                    // the wait began, after a short grace.
+                    if ready == "complete" && real_page(&href) && same_url(&href, &start_href) {
+                        let since = *settled_since.get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed() >= Duration::from_millis(1200) {
+                            return Ok(true);
+                        }
+                    } else {
+                        settled_since = None;
+                    }
+                    Ok(false)
                 },
             )?;
             Ok(json!({"navigated": true}))
@@ -294,9 +445,13 @@ fn assert_element_exists() -> Tool {
                     .is_some(),
                 None => {
                     let sel = ctx.param_str("selector")?;
-                    snap.interactive
+                    let snap_hit = snap
+                        .interactive
                         .iter()
-                        .any(|e| e.tag == sel || e.refs.iter().any(|r| r.value == sel))
+                        .any(|e| e.tag == sel || e.refs.iter().any(|r| r.value == sel));
+                    // Live DOM fallback: supports CSS/text=/role=/xpath= that are
+                    // not part of the cached interactive snapshot.
+                    snap_hit || ctx.element_snapshot(tab).is_ok()
                 }
             };
             if exists {
@@ -314,13 +469,26 @@ fn assert_element_exists() -> Tool {
 fn assert_text_contains() -> Tool {
     Tool::new(
         "assert_text_contains",
-        "Assert the page visible text contains the given substring. Returns {contains: true} or an error.",
-        json!({"text": {"type": "string", "required": true}}),
+        "Assert the page visible text — or one element's text (by 'selector'/'id'/'ref') — contains the given substring. Returns {contains: true} or an error.",
+        json!({
+            "text": {"type": "string", "required": true},
+            "selector": {"type": "string", "required": false},
+            "id": {"type": "string", "required": false},
+            "ref": {"type": "string", "required": false},
+            "element": {"type": "string", "required": false}
+        }),
         r#"{"text": "Login"}"#,
         |ctx| {
             let tab = ctx.target_tab()?;
             let needle = ctx.param_str("text")?;
-            let text = ctx.runtime.engine().get_page_text(tab)?;
+            let has_target = ["selector", "id", "ref", "element"]
+                .iter()
+                .any(|k| ctx.params.get(*k).is_some());
+            let text = if has_target {
+                ctx.element_snapshot(tab)?.text.unwrap_or_default()
+            } else {
+                ctx.runtime.engine().get_page_text(tab)?
+            };
             if text.contains(&needle) {
                 Ok(json!({"contains": true}))
             } else {
@@ -487,5 +655,57 @@ mod tests {
             "wait_for_text should wake on event, not spin until timeout (elapsed {:?})",
             start.elapsed()
         );
+    }
+
+    /// 回归：`navigate` 后若页面仍停在上一页，`wait_for_*` 必须能区分出
+    /// “当前地址 ≠ 目标地址”，否则会秒回并读到旧内容。
+    #[test]
+    fn same_url_distinguishes_stale_page_from_target() {
+        assert!(same_url("https://a.com/x", "https://a.com/x"));
+        assert!(same_url("https://a.com/x#frag", "https://a.com/x"));
+        assert!(same_url("https://a.com/x/", "https://a.com/x"));
+        // 百分号编码 vs 原始 UTF-8
+        assert!(same_url(
+            "https://zh.wikipedia.org/wiki/%E5%85%88%E7%88%B6%E9%81%97%E4%BC%A0",
+            "https://zh.wikipedia.org/wiki/\u{5148}\u{7236}\u{9057}\u{4f20}"
+        ));
+        // 不同页面必须区分（会话里“导航到 A 却读到 B”的根因）
+        assert!(!same_url(
+            "https://baike.baidu.com/item/a",
+            "https://zhuanlan.zhihu.com/p/1"
+        ));
+        // 空串不可判定 → 不阻塞（引擎不支持读取 href 时保持向后兼容）
+        assert!(same_url("", "https://a.com"));
+        assert!(same_url("https://a.com", ""));
+    }
+
+    #[test]
+    fn url_gate_accepts_redirects_but_not_the_old_page() {
+        // No known target → gate open.
+        assert!(url_gate_ok(None, "", "https://a.com"));
+        // Already at the target at wait start → target (or its fragment form) OK.
+        let t = Some("https://new.example/x");
+        assert!(url_gate_ok(
+            t,
+            "https://new.example/x",
+            "https://new.example/x"
+        ));
+        assert!(url_gate_ok(
+            t,
+            "https://new.example/x",
+            "https://new.example/x#frag"
+        ));
+        // Pending navigation: the OLD page (== start) must NOT satisfy the gate.
+        let start = "https://old.example/";
+        assert!(
+            !url_gate_ok(t, start, start),
+            "old page must not pass the gate"
+        );
+        assert!(!url_gate_ok(t, start, "https://old.example/#x"));
+        // Reaching the target passes.
+        assert!(url_gate_ok(t, start, "https://new.example/x"));
+        // A server redirect / SPA canonicalisation passes (previously timed out).
+        assert!(url_gate_ok(t, start, "https://new.example/x?redirected=1"));
+        assert!(url_gate_ok(t, start, "https://cdn.other/landing"));
     }
 }

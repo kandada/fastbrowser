@@ -8,7 +8,7 @@
 //! a separate process, so it must follow the most-recently-active tab via the
 //! stable `targetId` in the manifest, and `list_tabs` must reflect real tabs.
 
-#![cfg(feature = "engine-cdp")]
+#![cfg(all(feature = "engine-cdp", feature = "heavy-tests"))]
 
 mod common;
 

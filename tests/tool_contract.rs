@@ -187,6 +187,8 @@ const CONTRACT: &[(&str, &str, bool, &[&str])] = &[
     ("set_scroll_position", r#"{"y":100}"#, true, &["ok"]),
     ("get_performance_metrics", "{}", true, &["metrics"]),
     ("get_accessibility_tree", "{}", true, &["tree", "count"]),
+    ("get_console_logs", "{}", true, &["logs", "count"]),
+    ("get_network_log", "{}", true, &["entries", "count"]),
     // ── 会话 ──
     (
         "cookie_get",
@@ -286,7 +288,21 @@ const CONTRACT: &[(&str, &str, bool, &[&str])] = &[
         true,
         &["path", "bytes", "ok"],
     ),
+    // download: 需要真实网络；契约表只验证「不可达时优雅失败」。
+    // 成功的二进制落盘行为见 tests/download_tool.rs。
+    (
+        "download",
+        r#"{"url":"http://127.0.0.1:1/fb-contract","path":"/tmp/fb_contract_dl.bin"}"#,
+        false,
+        &[],
+    ),
     // ── 设备模拟 / 认证（mock 无 CDP/Emulation → 预期优雅失败）──
+    (
+        "set_viewport",
+        r#"{"width":1280,"height":720}"#,
+        true,
+        &["ok"],
+    ),
     ("set_touch_emulation", r#"{"enabled":true}"#, false, &[]),
     (
         "set_geolocation",
@@ -340,9 +356,21 @@ fn every_tool_obeys_its_contract() {
 #[test]
 fn tool_count_matches_manifest() {
     let s = sdk();
+    // 契约表覆盖所有「浏览器」工具；ax_* 工具在 feature `surface` 下额外注册，
+    // 其契约由 tests/surface.rs 专门覆盖。
+    let surface_tools = s
+        .tool_list()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| {
+            let n = t["name"].as_str().unwrap_or("");
+            n.starts_with("ax_")
+        })
+        .count();
     assert_eq!(
         s.tool_count(),
-        CONTRACT.len(),
+        CONTRACT.len() + surface_tools,
         "manifest tools must all be covered by the contract table"
     );
 }

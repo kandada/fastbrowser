@@ -5,6 +5,7 @@
 
 use serde_json::json;
 
+use crate::engine::Capability;
 use crate::tools::tool::Tool;
 
 pub fn tools() -> Vec<Tool> {
@@ -22,7 +23,22 @@ fn pending_dialog() -> Tool {
             // Route CDP events first so dialogOpening/Closed state is up to date.
             let _ = ctx.runtime.engine().drain_events(tab);
             let dlg = ctx.runtime.engine().pending_dialog(tab);
-            Ok(json!({"dialog": dlg}))
+            if dlg.is_some() {
+                return Ok(json!({"dialog": dlg}));
+            }
+            // Webview fallback: read the injected dialog buffer (see
+            // WebViewUIDelegate); the last entry is the most recent dialog.
+            if let Ok(v) = ctx.eval(
+                tab,
+                "JSON.stringify((window.__fbDialogs||[]).slice(-1)[0]||null)",
+            ) {
+                if let Some(s) = v.as_str() {
+                    if let Ok(d) = serde_json::from_str::<serde_json::Value>(s) {
+                        return Ok(json!({"dialog": d}));
+                    }
+                }
+            }
+            Ok(json!({"dialog": null}))
         },
     )
 }
@@ -30,11 +46,20 @@ fn pending_dialog() -> Tool {
 fn dialog_accept() -> Tool {
     Tool::new(
         "dialog_accept",
-        "Accept the pending JS dialog. For prompt dialogs, optionally pass 'prompt_text'.",
-        json!({"prompt_text": {"type": "string", "description": "Input for prompt dialogs", "required": false}}),
+        "Handle the pending JS dialog. Accepts by default; pass 'accept': false to dismiss (Playwright MCP's browser_handle_dialog). For prompt dialogs, optionally pass 'prompt_text'.",
+        json!({
+            "prompt_text": {"type": "string", "description": "Input for prompt dialogs", "required": false},
+            "accept": {"type": "boolean", "default": true, "description": "true=accept, false=dismiss"}
+        }),
         r#"{"prompt_text": "yes"}"#,
         |ctx| {
             let tab = ctx.target_tab()?;
+            let accept = ctx.param_opt::<bool>("accept")?.unwrap_or(true);
+            if !accept {
+                ctx.runtime.engine().dialog_dismiss(tab)?;
+                let _ = ctx.runtime.engine().drain_events(tab);
+                return Ok(json!({"dismissed": true, "ok": true}));
+            }
             let text = ctx.param_opt::<String>("prompt_text")?;
             ctx.runtime.engine().dialog_accept(tab, text.as_deref())?;
             // Route dialogClosed events to clear the pending dialog.
@@ -42,6 +67,8 @@ fn dialog_accept() -> Tool {
             Ok(json!({"accepted": true, "ok": true}))
         },
     )
+    // 原生 JS 对话框处理需要引擎支持（webview 未实现 → 隐藏）。
+    .requires(&[Capability::Dialogs])
 }
 
 fn dialog_dismiss() -> Tool {
@@ -57,6 +84,7 @@ fn dialog_dismiss() -> Tool {
             Ok(json!({"dismissed": true, "ok": true}))
         },
     )
+    .requires(&[Capability::Dialogs])
 }
 
 #[cfg(test)]
@@ -90,5 +118,15 @@ mod tests {
         assert_eq!(none["dialog"], Value::Null);
         let _ = call(&dialog_accept(), &r, json!({}));
         let _ = call(&dialog_dismiss(), &r, json!({}));
+    }
+
+    #[test]
+    fn dialog_accept_false_dismisses() {
+        let r = runtime();
+        // Playwright MCP's browser_handle_dialog {accept:false} → dismiss.
+        let v = call(&dialog_accept(), &r, json!({"accept": false}));
+        assert_eq!(v["dismissed"], json!(true), "{v}");
+        let v = call(&dialog_accept(), &r, json!({"accept": true}));
+        assert_eq!(v["accepted"], json!(true), "{v}");
     }
 }

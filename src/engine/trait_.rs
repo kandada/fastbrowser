@@ -32,6 +32,17 @@ pub struct EngineCapabilities {
     pub supports_storage: bool,
     pub supports_cookies: bool,
     pub supports_network_control: bool,
+    /// 运行时是否装配了「电脑操作表面层」（由 Runtime 按注册表覆盖）。
+    pub supports_surface: bool,
+    /// 导航历史内省（`get_history`）。webview 引擎未实现。
+    pub supports_history: bool,
+    /// 原生 JS 对话框（`dialog_accept` / `dialog_dismiss`）。webview 引擎未实现。
+    pub supports_dialogs: bool,
+    /// 文件选择输入（`set_file_input`）。webview 引擎需要宿主支持。
+    pub supports_file_input: bool,
+    /// 页面截图（`screenshot` / `screenshot_element`）。CDP 引擎与
+    /// webview 引擎（宿主 `wv.draw` / `takeSnapshot`）均支持。
+    pub supports_screenshot: bool,
 }
 
 /// 工具对引擎的能力要求（能力位驱动工具收敛：LLM 只会看到引擎支持的子集）。
@@ -41,6 +52,16 @@ pub enum Capability {
     Cdp,
     /// 需要网络请求控制（`block_request` / `intercept_request` / 拦截处理）。
     NetworkControl,
+    /// 需要电脑操作表面层（`surface_*` 工具）。
+    Surface,
+    /// 需要导航历史内省（`get_history`）。
+    History,
+    /// 需要原生 JS 对话框（`dialog_accept` / `dialog_dismiss`）。
+    Dialogs,
+    /// 需要文件选择输入（`set_file_input`）。
+    FileInput,
+    /// 需要页面截图（`screenshot` / `screenshot_element`）。
+    Screenshot,
 }
 
 impl EngineCapabilities {
@@ -49,6 +70,11 @@ impl EngineCapabilities {
         match cap {
             Capability::Cdp => self.supports_cdp,
             Capability::NetworkControl => self.supports_network_control,
+            Capability::Surface => self.supports_surface,
+            Capability::History => self.supports_history,
+            Capability::Dialogs => self.supports_dialogs,
+            Capability::FileInput => self.supports_file_input,
+            Capability::Screenshot => self.supports_screenshot,
         }
     }
 
@@ -63,6 +89,11 @@ impl EngineCapabilities {
             supports_storage: true,
             supports_cookies: true,
             supports_network_control: true,
+            supports_surface: false,
+            supports_history: true,
+            supports_dialogs: true,
+            supports_file_input: true,
+            supports_screenshot: true,
         }
     }
 
@@ -78,6 +109,11 @@ impl EngineCapabilities {
             supports_storage: true,
             supports_cookies: true,
             supports_network_control: false,
+            supports_surface: false,
+            supports_history: false,
+            supports_dialogs: false,
+            supports_file_input: false,
+            supports_screenshot: true,
         }
     }
 }
@@ -182,11 +218,45 @@ pub trait BrowserEngine: Send + Sync {
     /// 用于 Agent 感知 / 传输体积优化。`format` ∈ {"png", "jpeg"}。
     /// 返回 (宽, 高, 原始字节)。默认引擎不支持则返回 Unsupported，
     /// 工具层会回落为 `screenshot()` 的 RGBA 路径。
-    fn capture_encoded(&self, _tab: TabId, _format: &str) -> Result<(u32, u32, Vec<u8>)> {
-        Err(crate::engine::EngineError::unsupported(format!(
-            "engine '{}' does not support encoded capture",
-            self.name()
-        )))
+    /// Capture the tab encoded as `png`/`jpeg`. Engines that can encode
+    /// natively (CDP) override this; the default encodes the RGBA screenshot in
+    /// Rust so `screenshot(format=…)` works on every engine (incl. webview).
+    fn capture_encoded(&self, tab: TabId, format: &str) -> Result<(u32, u32, Vec<u8>)> {
+        let img = self.screenshot(tab)?;
+        let (w, h) = (img.width, img.height);
+        let rgba = image::RgbaImage::from_raw(w, h, img.rgba).ok_or_else(|| {
+            crate::engine::EngineError::new(
+                crate::engine::ErrorKind::Snapshot,
+                "screenshot buffer size mismatch",
+            )
+        })?;
+        let mut buf: Vec<u8> = Vec::new();
+        let enc_err = |e: image::ImageError| {
+            crate::engine::EngineError::new(
+                crate::engine::ErrorKind::Snapshot,
+                format!("image encode failed: {e}"),
+            )
+        };
+        match format {
+            "png" => {
+                use image::ImageEncoder;
+                image::codecs::png::PngEncoder::new(&mut buf)
+                    .write_image(rgba.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+                    .map_err(enc_err)?;
+            }
+            "jpeg" | "jpg" => {
+                let rgb = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 80)
+                    .encode(rgb.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+                    .map_err(enc_err)?;
+            }
+            other => {
+                return Err(crate::engine::EngineError::unsupported(format!(
+                    "unknown screenshot format '{other}'"
+                )))
+            }
+        }
+        Ok((w, h, buf))
     }
 
     // ── 轻量页面内省（避免整页快照的全量 DOM 扫描）──────────────
@@ -225,6 +295,14 @@ pub trait BrowserEngine: Send + Sync {
     // ── 事件 ──────────────────────────────────────────────────
     /// 拉取该标签页待处理事件（LLM 循环在每次动作后调用）。
     fn drain_events(&self, tab: TabId) -> Vec<PageEvent>;
+
+    /// 只读快照：最近保留的 `Console` / `Request` / `Response` 事件，**不会**
+    /// 被 [`Self::drain_events`] 消费。供 `get_console_logs` / `get_network_log`
+    /// 读取。未实现（或无此缓冲）的引擎返回空。
+    fn recent_events(&self, tab: TabId) -> Vec<PageEvent> {
+        let _ = tab;
+        Vec::new()
+    }
 
     // ── 事件驱动等待 ─────────────────────────────────────────
     /// 当前事件代数（事件驱动等待的基准）。未实现通知机制的引擎返回 0，

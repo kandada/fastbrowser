@@ -180,7 +180,7 @@ impl BundledChromium {
                 "bundled chromium debug endpoint not ready",
             ));
         }
-        let timeout = config.command_timeout_ms.max(5_000);
+        let timeout = config.effective_command_timeout_ms();
         ChromiumCdpEngine::with_keep(&url, config, timeout, Some(Box::new(host)))
     }
 }

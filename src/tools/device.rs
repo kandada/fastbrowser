@@ -9,7 +9,33 @@ use crate::engine::Capability;
 use crate::tools::tool::Tool;
 
 pub fn tools() -> Vec<Tool> {
-    vec![set_touch_emulation(), set_geolocation(), set_timezone()]
+    vec![
+        set_viewport(),
+        set_touch_emulation(),
+        set_geolocation(),
+        set_timezone(),
+    ]
+}
+
+fn set_viewport() -> Tool {
+    Tool::new(
+        "set_viewport",
+        "Resize the page viewport (width/height in CSS px). Playwright MCP's browser_resize.",
+        json!({
+            "width": {"type": "integer", "required": true},
+            "height": {"type": "integer", "required": true}
+        }),
+        r#"{"width": 1280, "height": 720}"#,
+        |ctx| {
+            let tab = ctx.target_tab()?;
+            let width = ctx.param::<u32>("width")?;
+            let height = ctx.param::<u32>("height")?;
+            ctx.runtime
+                .engine()
+                .set_viewport(tab, crate::engine::Viewport::new(width, height))?;
+            Ok(json!({"width": width, "height": height, "ok": true}))
+        },
+    )
 }
 
 fn set_touch_emulation() -> Tool {

@@ -595,7 +595,8 @@ fn deep_param_validation() {
     // fill_form 值必须是对象
     let r = s.tool_call("fill_form", json!({"values": [1, 2]}));
     assert!(r.is_err());
-    // block_request patterns 必须是数组
-    let r = s.tool_call("block_request", json!({"patterns": "*.ads*"}));
+    // block_request patterns 给一个真正错误的类型（数字）应报错。
+    // 注意：单个字符串会被宽松强转成单元素数组（coerce_params，与数值/布尔强转一致）。
+    let r = s.tool_call("block_request", json!({"patterns": 123}));
     assert!(r.is_err());
 }

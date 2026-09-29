@@ -45,6 +45,40 @@ fn action_js(id: char, body: &str) -> String {
     crate::engine::inject::action_js(id, body)
 }
 
+/// AX 遍历节点上限（防止超大页面卡顿）。
+const AX_NODE_CAP: usize = 2000;
+/// AX 几何查询预算（`DOM.getBoxModel` 次数上限）。
+const AX_GEO_BUDGET: usize = 200;
+
+/// 从 CDP AX 节点的 `properties` 数组提取统一状态键。
+fn ax_props(node: &Value) -> Value {
+    let mut m = serde_json::Map::new();
+    if let Some(props) = node.get("properties").and_then(Value::as_array) {
+        for p in props {
+            let name = p.get("name").and_then(Value::as_str).unwrap_or("");
+            if matches!(
+                name,
+                "checked"
+                    | "disabled"
+                    | "selected"
+                    | "expanded"
+                    | "focused"
+                    | "required"
+                    | "invalid"
+                    | "level"
+                    | "pressed"
+                    | "editable"
+                    | "busy"
+            ) {
+                if let Some(v) = p.get("value").and_then(|v| v.get("value")) {
+                    m.insert(name.to_string(), v.clone());
+                }
+            }
+        }
+    }
+    Value::Object(m)
+}
+
 /// True for browser-internal pages that must never be driven as a "web page":
 /// any extension page (side panel / new tab / options of the host extension,
 /// and other extensions), chrome:// pages and devtools. The agent must never
@@ -151,6 +185,10 @@ pub struct ChromiumCdpEngine {
     accept_downloads: bool,
     /// 持有宿主（如 CEF 引导）使其存活；引擎自身逻辑不感知。
     _keep: Option<Box<dyn std::any::Any + Send + Sync>>,
+    /// 持久日志缓冲（Console / Request / Response），**不**被 `drain_events`
+    /// 消费，供 `get_console_logs` / `get_network_log` 读取。
+    logs:
+        std::sync::RwLock<std::collections::HashMap<TabId, std::collections::VecDeque<PageEvent>>>,
     /// 引擎级全局事件通知器（异步事件泵唤醒用）。
     any: Arc<EventNotifier>,
 }
@@ -197,6 +235,7 @@ impl ChromiumCdpEngine {
             download_path: config.default_download_path.clone(),
             accept_downloads: config.accept_downloads,
             any: Arc::new(EventNotifier::new()),
+            logs: std::sync::RwLock::new(std::collections::HashMap::new()),
         };
         engine.initialize()?;
         Ok(engine)
@@ -231,6 +270,7 @@ impl ChromiumCdpEngine {
             download_path: config.default_download_path.clone(),
             accept_downloads: config.accept_downloads,
             any: Arc::new(EventNotifier::new()),
+            logs: RwLock::new(HashMap::new()),
         })
     }
 
@@ -503,6 +543,36 @@ impl ChromiumCdpEngine {
         self.read_tab(tab, |t| t.session_id.clone())
     }
 
+    /// Send a page-domain command, retrying briefly on Chrome's transient
+    /// "Not attached to an active page" error. Chrome detaches/re-attaches the
+    /// page target for a moment during a (re)navigation, so a command issued
+    /// right after `reload`/`navigate` can fail spuriously.
+    fn send_page(&self, sid: &str, method: &str, params: Value) -> Result<Value> {
+        let mut last: Option<crate::engine::EngineError> = None;
+        for _ in 0..40 {
+            match self
+                .cdp
+                .send_with_session(Some(sid), method, params.clone())
+            {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    if e.to_string().contains("Not attached to an active") {
+                        last = Some(e);
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| {
+            crate::engine::EngineError::new(
+                crate::engine::ErrorKind::Navigation,
+                "cdp page command: target stayed detached",
+            )
+        }))
+    }
+
     fn eval(&self, tab: TabId, expr: &str) -> Result<Value> {
         let sid = self.session(tab)?.to_string();
         let resp = self.cdp.send_with_session(
@@ -591,21 +661,25 @@ impl ChromiumCdpEngine {
     }
 
     fn resolve_id(&self, tab: TabId, r: &ElementRef) -> Result<char> {
-        self.read_tab(tab, |t| match r.kind {
-            RefKind::Snapshot => r
+        if r.kind == RefKind::Snapshot {
+            return r
                 .value
                 .chars()
                 .next()
-                .ok_or_else(|| EngineError::invalid("bad snapshot id")),
-            _ => t
-                .elements
-                .iter()
-                .find(|e| e.matches_ref(r))
-                .map(|e| e.id)
-                .ok_or_else(|| {
-                    EngineError::new(ErrorKind::Dom, format!("element {r:?} not found"))
-                }),
-        })?
+                .ok_or_else(|| EngineError::invalid("bad snapshot id"));
+        }
+        // 1) cached snapshot refs (css #id / text / xpath, if present)
+        let cached = self.read_tab(tab, |t| {
+            t.elements.iter().find(|e| e.matches_ref(r)).map(|e| e.id)
+        })?;
+        if let Some(id) = cached {
+            return Ok(id);
+        }
+        // 2) live DOM query (arbitrary CSS / XPath / text / role)
+        let v = self.eval_quick(tab, &crate::engine::inject::live_resolve_js(r))?;
+        v.as_str()
+            .and_then(|s| s.chars().next())
+            .ok_or_else(|| EngineError::new(ErrorKind::Dom, format!("element {r} not found")))
     }
 
     // ── 下载落盘 ────────────────────────────────────────────────
@@ -650,7 +724,7 @@ impl ChromiumCdpEngine {
             Some(sid),
             "Page.addScriptToEvaluateOnNewDocument",
             json!({
-                "source": Self::snapshot_observer_js(),
+                "source": format!("{}\n{}", Self::snapshot_observer_js(), crate::engine::inject::console_capture_js()),
             }),
         );
         let _ = self.cdp.send_with_session_timeout(
@@ -829,9 +903,7 @@ impl ChromiumCdpEngine {
     /// `Page.goBack/goForward` 在新版 Chrome 中不可靠；用 entryId 精确导航。
     fn navigate_history(&self, tab: TabId, delta: i32) -> Result<()> {
         let sid = self.session(tab)?.to_string();
-        let resp =
-            self.cdp
-                .send_with_session(Some(&sid), "Page.getNavigationHistory", json!({}))?;
+        let resp = self.send_page(&sid, "Page.getNavigationHistory", json!({}))?;
         let entries = resp
             .pointer("/result/entries")
             .and_then(Value::as_array)
@@ -850,8 +922,8 @@ impl ChromiumCdpEngine {
             .and_then(Value::as_i64)
             .unwrap_or(-1);
         if entry_id >= 0 {
-            self.cdp.send_with_session(
-                Some(&sid),
+            self.send_page(
+                &sid,
                 "Page.navigateToHistoryEntry",
                 json!({ "entryId": entry_id }),
             )?;
@@ -1208,6 +1280,17 @@ impl ChromiumCdpEngine {
             if let Some(sink) = t.event_sink.clone() {
                 sink.on_page_event(tab, &ev);
             }
+            if matches!(
+                &ev,
+                PageEvent::Console { .. } | PageEvent::Request { .. } | PageEvent::Response { .. }
+            ) {
+                let mut logs = self.logs.write().unwrap_or_else(|e| e.into_inner());
+                let q = logs.entry(tab).or_default();
+                q.push_back(ev.clone());
+                while q.len() > crate::engine::MAX_BUFFERED_EVENTS {
+                    q.pop_front();
+                }
+            }
             t.events.push_back(ev);
             // 有界缓冲：防 Agent 不 drain 时无限增长（保留最新）
             while t.events.len() > crate::engine::MAX_BUFFERED_EVENTS {
@@ -1216,6 +1299,114 @@ impl ChromiumCdpEngine {
             t.notifier.notify();
             self.any.notify();
         }
+    }
+}
+
+impl ChromiumCdpEngine {
+    /// 递归收集 AX 节点；`ignored` 节点下钻（其子节点拼接给父级）。
+    fn ax_collect(
+        &self,
+        sid: &str,
+        id: &str,
+        by_id: &HashMap<String, Value>,
+        counter: &mut usize,
+        geo_counter: &mut usize,
+        flat: &mut Vec<Value>,
+    ) -> Vec<Value> {
+        if *counter >= AX_NODE_CAP {
+            return Vec::new();
+        }
+        let Some(node) = by_id.get(id) else {
+            return Vec::new();
+        };
+        *counter += 1;
+
+        let mut children: Vec<Value> = Vec::new();
+        if let Some(child_ids) = node.get("childIds").and_then(Value::as_array) {
+            for cid in child_ids {
+                if let Some(c) = cid.as_str() {
+                    children.extend(self.ax_collect(sid, c, by_id, counter, geo_counter, flat));
+                }
+            }
+        }
+
+        if node
+            .get("ignored")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return children;
+        }
+
+        let text = |key: &str| {
+            node.get(key)
+                .and_then(|r| r.get("value"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        let role = text("role");
+        let name = text("name");
+        let backend_id = node.get("backendDOMNodeId").and_then(Value::as_i64);
+        // Each geometry lookup is a CDP round-trip; only resolve it for
+        // meaningful nodes (named / role-bearing), not every generic container.
+        let want_geo = !role.is_empty() || !name.is_empty();
+        let geometry = match backend_id {
+            Some(bid) if want_geo && *geo_counter < AX_GEO_BUDGET => {
+                let g = self.ax_geometry(sid, bid);
+                if g.is_some() {
+                    *geo_counter += 1;
+                }
+                g
+            }
+            _ => None,
+        };
+
+        let built = json!({
+            "role": role,
+            "name": name,
+            "value": text("value"),
+            "description": text("description"),
+            "props": ax_props(node),
+            "backend_id": backend_id,
+            "geometry": geometry,
+            "children": children,
+        });
+        flat.push(built.clone());
+        vec![built]
+    }
+
+    /// `DOM.getBoxModel(backendNodeId)` → 轴对齐包围盒（CSS 像素）。
+    fn ax_geometry(&self, sid: &str, backend_id: i64) -> Option<Value> {
+        let resp = self
+            .cdp
+            .send_with_session(
+                Some(sid),
+                "DOM.getBoxModel",
+                json!({ "backendNodeId": backend_id }),
+            )
+            .ok()?;
+        let content = resp
+            .get("result")
+            .and_then(|r| r.get("model"))
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array)?;
+        let nums: Vec<f64> = content.iter().filter_map(Value::as_f64).collect();
+        if nums.len() < 8 {
+            return None;
+        }
+        let xs = [nums[0], nums[2], nums[4], nums[6]];
+        let ys = [nums[1], nums[3], nums[5], nums[7]];
+        let minx = xs.iter().copied().fold(f64::INFINITY, f64::min);
+        let maxx = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let miny = ys.iter().copied().fold(f64::INFINITY, f64::min);
+        let maxy = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        Some(json!({
+            "x": minx,
+            "y": miny,
+            "width": maxx - minx,
+            "height": maxy - miny,
+        }))
     }
 }
 
@@ -1824,9 +2015,11 @@ impl BrowserEngine for ChromiumCdpEngine {
     }
 
     fn execute_xpath(&self, tab: TabId, expr: &str) -> Result<Value> {
+        // Embed as a JSON string literal (valid JS) so quotes / backslashes /
+        // newlines can't break the generated script.
+        let expr_js = serde_json::to_string(expr).unwrap_or_else(|_| "\"\"".into());
         let js = format!(
-            r#"(()=>{{const r=document.evaluate('{}',document,null,XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,null);let out=[];for(let i=0;i<r.snapshotLength;i++){{out.push(r.snapshotItem(i).innerText||'');}}return out;}})()"#,
-            expr.replace('\'', "\\'")
+            r#"(()=>{{const r=document.evaluate({expr_js},document,null,XPathResult.ANY_TYPE,null);if(r.resultType===XPathResult.NUMBER_TYPE)return r.numberValue;if(r.resultType===XPathResult.STRING_TYPE)return r.stringValue;if(r.resultType===XPathResult.BOOLEAN_TYPE)return r.booleanValue;const out=[];let n=r.iterateNext();while(n){{out.push(n.innerText!=null?n.innerText:(n.textContent||''));n=r.iterateNext();}}return out;}})()"#,
         );
         self.eval(tab, &js)
     }
@@ -1931,16 +2124,28 @@ impl BrowserEngine for ChromiumCdpEngine {
         let sid = self.session(tab)?.to_string();
         self.wait_present(tab, &sid, id)?;
         let val = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
+        // Match by option value, visible text, or label — see the webview engine.
         let js = action_js(
             id,
-            &format!(r#"el.value={val};el.dispatchEvent(new Event('change',{{bubbles:true}}))"#),
+            &format!(
+                r#"var v={val},o=null,opts=el.options||[];for(var i=0;i<opts.length;i++){{var op=opts[i];if(op.value===v||(op.text||'').trim()===v||op.label===v){{o=op;break;}}}}if(!o){{return 'nomatch';}}el.value=o.value;el.dispatchEvent(new Event('change',{{bubbles:true}}))"#
+            ),
         );
         let v = self.eval(tab, &js)?;
-        if v.as_str() == Some("notfound") {
-            return Err(EngineError::new(
-                ErrorKind::Dom,
-                "element not found in page",
-            ));
+        match v.as_str() {
+            Some("notfound") => {
+                return Err(EngineError::new(
+                    ErrorKind::Dom,
+                    "element not found in page",
+                ))
+            }
+            Some("nomatch") => {
+                return Err(EngineError::new(
+                    ErrorKind::InvalidArgument,
+                    format!("select_option: no <option> matches {value:?}"),
+                ))
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -2570,6 +2775,15 @@ impl BrowserEngine for ChromiumCdpEngine {
             .unwrap_or_default()
     }
 
+    fn recent_events(&self, tab: TabId) -> Vec<PageEvent> {
+        self.logs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&tab)
+            .map(|q| q.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     fn event_generation(&self, tab: TabId) -> u64 {
         self.read_tab(tab, |t| t.notifier.generation()).unwrap_or(0)
     }
@@ -2711,71 +2925,75 @@ impl BrowserEngine for ChromiumCdpEngine {
     }
 
     // ── 无障碍树（AX）─────────────────────────────────────────
+    //
+    // 返回：
+    //   - `tree`: 扁平节点列表（向后兼容；含 role/name/value/description/props/backend_id/geometry）
+    //   - `root`: 分层树（含 children；ignored 节点被下钻/拼接）
+    //   - `count`: 扁平节点数
+    //   - `geometry_nodes`: 成功取到几何的节点数
+    //   - `truncated`: 是否因节点上限截断
+    //
+    // 几何来自 `DOM.getBoxModel(backendNodeId)`，用于把 AX 节点关联到屏幕坐标
+    // （`BrowserSurface` 的 AX 快照/坐标动作依赖它）。
     fn accessibility_tree(&self, tab: TabId) -> Result<Value> {
         let sid = self.session(tab)?.to_string();
         let _ = self
             .cdp
             .send_with_session(Some(&sid), "Accessibility.enable", json!({}));
+        let _ = self
+            .cdp
+            .send_with_session(Some(&sid), "DOM.enable", json!({}));
         let resp =
             self.cdp
                 .send_with_session(Some(&sid), "Accessibility.getFullAXTree", json!({}))?;
-        let nodes = resp
+        let raw = resp
             .get("result")
             .and_then(|r| r.get("nodes"))
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let mut out = Vec::new();
-        for n in nodes {
-            let ignored = n.get("ignored").and_then(Value::as_bool).unwrap_or(false);
-            if ignored {
-                continue;
-            }
-            let role = n
-                .get("role")
-                .and_then(|r| r.get("value"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            // 只保留有意义的交互/结构节点，控制 token 量
-            if role == "generic" || role == "none" || role == "presentation" {
-                continue;
-            }
-            let name = n
-                .get("name")
-                .and_then(|r| r.get("value"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let value = n
-                .get("value")
-                .and_then(|r| r.get("value"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let desc = n
-                .get("description")
-                .and_then(|r| r.get("value"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let mut props = serde_json::Map::new();
-            for k in [
-                "checked", "disabled", "selected", "expanded", "level", "pressed",
-            ] {
-                if let Some(v) = n.get(k).and_then(|r| r.get("value")) {
-                    props.insert(k.to_string(), v.clone());
+
+        let mut by_id: HashMap<String, Value> = HashMap::new();
+        let mut root_id: Option<String> = None;
+        for n in raw {
+            if let Some(id) = n.get("nodeId").and_then(Value::as_str) {
+                if n.get("parentId").is_none() && root_id.is_none() {
+                    root_id = Some(id.to_string());
                 }
+                by_id.insert(id.to_string(), n);
             }
-            out.push(json!({
-                "role": role,
-                "name": name,
-                "value": value,
-                "description": desc,
-                "props": props,
-            }));
         }
-        Ok(json!({ "tree": out, "count": out.len() }))
+
+        let mut counter = 0usize;
+        let mut geo_counter = 0usize;
+        let mut flat: Vec<Value> = Vec::new();
+        let root = root_id
+            .as_deref()
+            .map(|id| self.ax_collect(&sid, id, &by_id, &mut counter, &mut geo_counter, &mut flat))
+            .and_then(|mut v| {
+                if v.len() == 1 {
+                    Some(v.remove(0))
+                } else {
+                    None
+                }
+            });
+
+        Ok(json!({
+            "tree": flat,
+            "root": root,
+            "count": flat.len(),
+            "geometry_nodes": geo_counter,
+            "truncated": counter >= AX_NODE_CAP,
+        }))
     }
 
     // ── 网络请求拦截处理 ───────────────────────────────────────
     fn pending_requests(&self, tab: TabId) -> Vec<Value> {
+        // `Fetch.requestPaused` events are only turned into `paused_requests`
+        // when the CDP event queue is routed; do it here so callers that only
+        // read the queue (e.g. the `list_pending_requests` tool) actually see
+        // freshly-paused requests instead of an always-empty list.
+        self.route_cdp_events();
         self.read_tab(tab, |t| t.paused_requests.clone())
             .unwrap_or_default()
     }

@@ -1,6 +1,6 @@
 [package]
 name = "fastbrowser-py"
-version = "0.1.3"
+version = "0.1.5"
 edition = "2021"
 license = "Apache-2.0"
 description = "Python bindings (PyO3) for the fastbrowser browser-automation kernel"
@@ -12,10 +12,20 @@ readme = "README.md"
 name = "_core"
 crate-type = ["cdylib"]
 
+[features]
+# Forward the kernel's native "computer-use" surface / accessibility backends so
+# the PyPI wheel ships full capability (UiNode surface + native A11y providers).
+# These backends are platform-specific and cannot be compiled together, so each
+# wheel selects exactly one from CI (see .github/workflows/wheels.yml).
+surface = ["fastbrowser/surface"]
+surface-macos = ["fastbrowser/surface-macos"]
+surface-linux = ["fastbrowser/surface-linux"]
+surface-windows = ["fastbrowser/surface-windows"]
+
 [dependencies]
 # `version` keeps the crate publishable-ready; `path` builds the wheel from the
 # kernel source in the same repo (`fastbrowser/` at the repository root).
-fastbrowser = { version = "0.1.3", path = "../..", features = ["engine-cdp"] }
+fastbrowser = { version = "0.1.5", path = "../..", features = ["engine-cdp"] }
 pyo3 = { version = "0.23", features = ["abi3-py38"] }
 serde_json = "1"
 base64 = "0.22"

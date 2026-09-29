@@ -58,6 +58,10 @@ pub struct WebViewEngine {
     /// per-tab 状态：`Arc<RwLock<WvTab>>`，不同标签页操作互不阻塞。
     tabs: std::sync::RwLock<HashMap<TabId, Arc<std::sync::RwLock<WvTab>>>>,
     active: std::sync::RwLock<Option<TabId>>,
+    /// 持久日志缓冲（Console / Request / Response），**不**被 `drain_events`
+    /// 消费，供 `get_console_logs` / `get_network_log` 读取。
+    logs:
+        std::sync::RwLock<std::collections::HashMap<TabId, std::collections::VecDeque<PageEvent>>>,
     next_tab: std::sync::atomic::AtomicU32,
     viewport: std::sync::RwLock<Viewport>,
 }
@@ -70,6 +74,7 @@ impl WebViewEngine {
             active: std::sync::RwLock::new(None),
             next_tab: std::sync::atomic::AtomicU32::new(1),
             viewport: std::sync::RwLock::new(config.viewport.unwrap_or(Viewport::new(390, 844))),
+            logs: std::sync::RwLock::new(std::collections::HashMap::new()),
         })
     }
 
@@ -97,6 +102,17 @@ impl WebViewEngine {
     fn push(&self, tab: TabId, ev: PageEvent) {
         if let Ok(p) = self.tab_arc(tab) {
             let mut t = p.write().unwrap_or_else(|e| e.into_inner());
+            if matches!(
+                &ev,
+                PageEvent::Console { .. } | PageEvent::Request { .. } | PageEvent::Response { .. }
+            ) {
+                let mut logs = self.logs.write().unwrap_or_else(|e| e.into_inner());
+                let q = logs.entry(tab).or_default();
+                q.push_back(ev.clone());
+                while q.len() > crate::engine::MAX_BUFFERED_EVENTS {
+                    q.pop_front();
+                }
+            }
             t.events.push_back(ev);
             // 有界缓冲：防 Agent 不 drain 时无限增长（保留最新）
             while t.events.len() > crate::engine::MAX_BUFFERED_EVENTS {
@@ -138,21 +154,28 @@ impl WebViewEngine {
 
     /// 解析元素引用 → data-fb 编号。
     fn resolve_id(&self, tab: TabId, r: &ElementRef) -> Result<char> {
-        self.read_tab(tab, |t| match r.kind {
-            RefKind::Snapshot => r
+        if r.kind == RefKind::Snapshot {
+            return r
                 .value
                 .chars()
                 .next()
-                .ok_or_else(|| EngineError::invalid("bad snapshot id")),
-            _ => t
-                .elements
-                .iter()
-                .find(|e| e.matches_ref(r))
-                .map(|e| e.id)
-                .ok_or_else(|| {
-                    EngineError::new(ErrorKind::Dom, format!("element {r:?} not found"))
-                }),
-        })?
+                .ok_or_else(|| EngineError::invalid("bad snapshot id"));
+        }
+        // 1) cached snapshot refs (css #id / text / xpath, if present)
+        let cached = self.read_tab(tab, |t| {
+            t.elements.iter().find(|e| e.matches_ref(r)).map(|e| e.id)
+        })?;
+        if let Some(id) = cached {
+            return Ok(id);
+        }
+        // 2) live DOM query (arbitrary CSS / XPath / text / role)
+        let handle = self.read_tab(tab, |t| t.handle)?;
+        let v = self
+            .ops
+            .evaluate_js(handle, &crate::engine::inject::live_resolve_js(r))?;
+        v.as_str()
+            .and_then(|s| s.chars().next())
+            .ok_or_else(|| EngineError::new(ErrorKind::Dom, format!("element {r} not found")))
     }
 }
 
@@ -201,13 +224,6 @@ impl BrowserEngine for WebViewEngine {
         wv.events.push_back(PageEvent::NavigationStarted {
             url: url.to_string(),
         });
-        wv.events.push_back(PageEvent::NavigationCompleted {
-            url: url.to_string(),
-            status: 200,
-        });
-        wv.events.push_back(PageEvent::Loaded {
-            url: url.to_string(),
-        });
         self.tabs
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -241,14 +257,32 @@ impl BrowserEngine for WebViewEngine {
     }
 
     fn list_tabs(&self) -> Vec<TabInfo> {
-        let map = self.tabs.read().unwrap_or_else(|e| e.into_inner());
-        map.iter()
-            .map(|(id, arc)| {
-                let t = arc.read().unwrap_or_else(|e| e.into_inner());
+        // Snapshot the tab table first, then refresh each cached title from the
+        // live DOM (`document.title`). The cached title is only updated on
+        // navigate/commit, so background tabs reported stale titles.
+        let entries: Vec<(TabId, u64, String, String)> = {
+            let map = self.tabs.read().unwrap_or_else(|e| e.into_inner());
+            map.iter()
+                .map(|(id, arc)| {
+                    let t = arc.read().unwrap_or_else(|e| e.into_inner());
+                    (*id, t.handle, t.url.clone(), t.title.clone())
+                })
+                .collect()
+        };
+        entries
+            .into_iter()
+            .map(|(id, handle, url, cached)| {
+                let title = self
+                    .ops
+                    .evaluate_js(handle, "document.title||''")
+                    .ok()
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(cached);
                 TabInfo {
-                    id: *id,
-                    url: t.url.clone(),
-                    title: t.title.clone(),
+                    id,
+                    url,
+                    title,
                     loading: false,
                     pinned: false,
                     created_ms: 0,
@@ -284,15 +318,12 @@ impl BrowserEngine for WebViewEngine {
             },
         );
         self.ops.navigate_webview(handle, url)?;
+        // 只更新目标地址，不伪造 NavigationCompleted/Loaded：宿主 WebView 的
+        // `load()` 是异步的，若在此立即标记完成，wait_for_load_state /
+        // wait_for_navigation 会基于“上一页”的 readyState 秒回，导致随后读到旧
+        // 页面内容。真实完成由等待工具比对 `location.href` 与目标 URL 判定。
         self.with_tab(tab, |t| {
             t.url = url.to_string();
-            t.events.push_back(PageEvent::NavigationCompleted {
-                url: url.to_string(),
-                status: 200,
-            });
-            t.events.push_back(PageEvent::Loaded {
-                url: url.to_string(),
-            });
             Ok(())
         })?;
         Ok(())
@@ -347,6 +378,35 @@ impl BrowserEngine for WebViewEngine {
     }
 
     fn get_links(&self, tab: TabId) -> Result<Vec<LinkInfo>> {
+        // Live DOM first: the cached snapshot elements are only refreshed on
+        // create/snapshot, so they are stale/empty right after a navigate.
+        let handle = self.read_tab(tab, |t| t.handle)?;
+        let js = "Array.from(document.querySelectorAll('a[href]')).map(a=>({url:a.href,text:(a.innerText||a.textContent||'').trim()}))";
+        if let Ok(v) = self.ops.evaluate_js(handle, js) {
+            if let Some(arr) = v.as_array() {
+                let links: Vec<LinkInfo> = arr
+                    .iter()
+                    .filter_map(|e| {
+                        let url = e.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                        if url.is_empty() || url.starts_with("javascript:") {
+                            return None;
+                        }
+                        Some(LinkInfo {
+                            url: url.to_string(),
+                            text: e
+                                .get("text")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        })
+                    })
+                    .collect();
+                if !links.is_empty() {
+                    return Ok(links);
+                }
+            }
+        }
+        // Fallback: cached snapshot elements.
         self.read_tab(tab, |t| {
             t.elements
                 .iter()
@@ -411,9 +471,13 @@ impl BrowserEngine for WebViewEngine {
 
     fn execute_xpath(&self, tab: TabId, expr: &str) -> Result<Value> {
         let handle = self.read_tab(tab, |t| t.handle)?;
+        // Embed the expression as a JSON string literal (valid JS), so quotes /
+        // backslashes / newlines can't break the generated script.
+        let expr_js = serde_json::to_string(expr).unwrap_or_else(|_| "\"\"".into());
+        // ANY_TYPE so scalar expressions (`count(//a)`, `string(…)`, boolean
+        // predicates) return their value instead of throwing "not a node set".
         let js = format!(
-            r#"(()=>{{const r=document.evaluate('{}',document,null,XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,null);let out=[];for(let i=0;i<r.snapshotLength;i++){{out.push(r.snapshotItem(i).innerText||'');}}return out;}})()"#,
-            expr.replace('\'', "\\'")
+            r#"(()=>{{const r=document.evaluate({expr_js},document,null,XPathResult.ANY_TYPE,null);if(r.resultType===XPathResult.NUMBER_TYPE)return r.numberValue;if(r.resultType===XPathResult.STRING_TYPE)return r.stringValue;if(r.resultType===XPathResult.BOOLEAN_TYPE)return r.booleanValue;const out=[];let n=r.iterateNext();while(n){{out.push(n.innerText!=null?n.innerText:(n.textContent||''));n=r.iterateNext();}}return out;}})()"#,
         );
         self.ops.evaluate_js(handle, &js)
     }
@@ -461,16 +525,32 @@ impl BrowserEngine for WebViewEngine {
         let handle = self.read_tab(tab, |t| t.handle)?;
         let id = self.resolve_id(tab, element)?;
         let val = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
+        // Match by option *value*, visible *text*, or *label* — LLMs routinely
+        // pass the visible label (e.g. "Green") rather than the value ("g").
+        // Returning `nomatch` instead of silently leaving the select unchanged
+        // (the old `el.value=…` was a no-op for a non-existent value yet still
+        // reported success).
         let js = action_js(
             id,
-            &format!(r#"el.value={val};el.dispatchEvent(new Event('change',{{bubbles:true}}))"#),
+            &format!(
+                r#"var v={val},o=null,opts=el.options||[];for(var i=0;i<opts.length;i++){{var op=opts[i];if(op.value===v||(op.text||'').trim()===v||op.label===v){{o=op;break;}}}}if(!o){{return 'nomatch';}}el.value=o.value;el.dispatchEvent(new Event('change',{{bubbles:true}}))"#
+            ),
         );
         let v = self.ops.evaluate_js(handle, &js)?;
-        if v.as_str() == Some("notfound") {
-            return Err(EngineError::new(
-                ErrorKind::Dom,
-                "element not found in page",
-            ));
+        match v.as_str() {
+            Some("notfound") => {
+                return Err(EngineError::new(
+                    ErrorKind::Dom,
+                    "element not found in page",
+                ))
+            }
+            Some("nomatch") => {
+                return Err(EngineError::new(
+                    ErrorKind::InvalidArgument,
+                    format!("select_option: no <option> matches {value:?}"),
+                ))
+            }
+            _ => {}
         }
         self.push(tab, PageEvent::DomChanged);
         Ok(())
@@ -511,8 +591,16 @@ impl BrowserEngine for WebViewEngine {
     }
 
     fn inject_event(&self, tab: TabId, ev: InputEvent) -> Result<()> {
-        self.ops
-            .dispatch_event(self.read_tab(tab, |t| t.handle)?, &ev)
+        let handle = self.read_tab(tab, |t| t.handle)?;
+        // The mobile WebView bridges do not deliver trusted native input (their
+        // `dispatch_event` is a no-op), so synthesise the DOM event in-page. This
+        // makes `press`/`send_keys` special keys, `hover`, `drag`, `swipe` and
+        // `click_coords` actually reach the page's listeners.
+        if let Some(js) = crate::engine::inject::input_event_js(&ev) {
+            self.ops.evaluate_js(handle, &js)?;
+            return Ok(());
+        }
+        self.ops.dispatch_event(handle, &ev)
     }
 
     fn evaluate(&self, tab: TabId, script: &str) -> Result<Value> {
@@ -520,11 +608,55 @@ impl BrowserEngine for WebViewEngine {
         self.ops.evaluate_js(handle, script)
     }
 
+    /// Accessibility tree built from the DOM/ARIA via injected JS. This gives
+    /// the mobile WebView hosts (Android/iOS) the same `get_accessibility_tree`
+    /// capability that the CDP engine exposes via `Accessibility.getFullAXTree`.
+    fn accessibility_tree(&self, tab: TabId) -> Result<Value> {
+        let handle = self.read_tab(tab, |t| t.handle)?;
+        let raw = self
+            .ops
+            .evaluate_js(handle, crate::engine::inject::accessibility_js())?;
+        let parsed = match raw.as_str() {
+            Some(s) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+            None => raw,
+        };
+        if parsed.is_null() {
+            return Err(crate::engine::EngineError::new(
+                crate::engine::ErrorKind::Evaluate,
+                "accessibility_tree: injected JS returned no result",
+            ));
+        }
+        Ok(serde_json::json!({
+            "tree": parsed.get("tree").cloned().unwrap_or_else(|| Value::Array(vec![])),
+            "root": parsed.get("root").cloned().unwrap_or(Value::Null),
+            "count": parsed.get("count").cloned().unwrap_or_else(|| serde_json::json!(0)),
+            "truncated": parsed.get("truncated").cloned().unwrap_or_else(|| serde_json::json!(false)),
+        }))
+    }
+
     fn page_title(&self, tab: TabId) -> Result<String> {
+        let handle = self.read_tab(tab, |t| t.handle)?;
+        // Live DOM: return `document.title` verbatim (even when empty) so a page
+        // without a <title> doesn't report the *previous* page's cached title.
+        if let Ok(v) = self.ops.evaluate_js(handle, "document.title||''") {
+            if let Some(s) = v.as_str() {
+                return Ok(s.to_string());
+            }
+        }
         self.read_tab(tab, |t| t.title.clone())
     }
 
     fn page_url(&self, tab: TabId) -> Result<String> {
+        let handle = self.read_tab(tab, |t| t.handle)?;
+        // Live DOM: the cached url is only refreshed on navigate/commit, so it is
+        // stale right after a client-side/host navigation.
+        if let Ok(v) = self.ops.evaluate_js(handle, "location.href||''") {
+            if let Some(s) = v.as_str() {
+                if !s.is_empty() {
+                    return Ok(s.to_string());
+                }
+            }
+        }
         self.read_tab(tab, |t| t.url.clone())
     }
 
@@ -618,18 +750,80 @@ impl BrowserEngine for WebViewEngine {
     }
 
     fn cookie_get(&self, tab: TabId, domain: Option<&str>) -> Result<Vec<Cookie>> {
-        self.read_tab(tab, |t| match domain {
-            Some(d) => t
-                .cookies
-                .iter()
-                .filter(|c| c.domain == d)
-                .cloned()
-                .collect(),
-            None => t.cookies.clone(),
-        })
+        let handle = self.read_tab(tab, |t| t.handle)?;
+        // Read the PAGE's cookies so the tool sees what page JS set.
+        let host = self
+            .ops
+            .evaluate_js(handle, "location.hostname||''")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        let raw = self
+            .ops
+            .evaluate_js(
+                handle,
+                "(()=>{try{return document.cookie;}catch(e){return '';}})()",
+            )
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        let mut out: Vec<Cookie> = Vec::new();
+        for pair in raw.split(';') {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            let (n, v) = pair.split_once('=').unwrap_or((pair, ""));
+            out.push(Cookie {
+                name: n.trim().to_string(),
+                value: v.trim().to_string(),
+                domain: host.clone(),
+                path: "/".to_string(),
+                expires: None,
+                secure: false,
+                http_only: false,
+                same_site: None,
+            });
+        }
+        // Merge jar cookies that aren't page-visible (keeps explicit metadata).
+        for c in self.read_tab(tab, |t| t.cookies.clone())? {
+            if !out.iter().any(|o| o.name == c.name && o.value == c.value) {
+                out.push(c);
+            }
+        }
+        if let Some(d) = domain {
+            out.retain(|c| c.domain == d);
+        }
+        Ok(out)
     }
 
     fn cookie_set(&self, tab: TabId, cookie: &Cookie) -> Result<()> {
+        let handle = self.read_tab(tab, |t| t.handle)?;
+        // Mirror into the page so `document.cookie` sees it too.
+        let name = serde_json::to_string(&cookie.name).unwrap_or_else(|_| "\"\"".into());
+        let value = serde_json::to_string(&cookie.value).unwrap_or_else(|_| "\"\"".into());
+        let path = serde_json::to_string(if cookie.path.is_empty() {
+            "/"
+        } else {
+            &cookie.path
+        })
+        .unwrap_or_else(|_| "\"/\"".into());
+        let domain = serde_json::to_string(&cookie.domain).unwrap_or_else(|_| "\"\"".into());
+        let secure = cookie.secure;
+        let samesite = cookie
+            .same_site
+            .as_ref()
+            .map(|s| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into()))
+            .unwrap_or_else(|| "\"\"".into());
+        let exp = cookie
+            .expires
+            .map(|e| format!("new Date({}*1000).toUTCString()", e))
+            .unwrap_or_else(|| "\"\"".into());
+        let js = format!(
+            "(()=>{{try{{var c={name}+\"=\"+{value};c+=\"; path=\"+{path};if({domain})c+=\"; domain=\"+{domain};var _e={exp};if(_e)c+=\"; expires=\"+_e;if({secure})c+=\"; secure\";if({samesite})c+=\"; samesite=\"+{samesite};document.cookie=c;return 'ok';}}catch(e){{return String(e);}}}})()",
+        );
+        let _ = self.ops.evaluate_js(handle, &js);
+        // Keep the jar for metadata/filtering (http_only can't be set via JS).
         self.with_tab(tab, |t| {
             t.cookies
                 .retain(|c| !(c.name == cookie.name && c.domain == cookie.domain));
@@ -639,6 +833,15 @@ impl BrowserEngine for WebViewEngine {
     }
 
     fn cookie_clear(&self, tab: TabId, domain: Option<&str>, name: Option<&str>) -> Result<()> {
+        let handle = self.read_tab(tab, |t| t.handle)?;
+        // Expire matching cookies in the page as well.
+        let want = name
+            .map(|n| serde_json::to_string(n).unwrap_or_else(|_| "\"\"".into()))
+            .unwrap_or_else(|| "\"\"".into());
+        let js = format!(
+            "(()=>{{try{{var w={want};var host=location.hostname||'';var doms=['','; domain='+host,'; domain=.'+host];var paths=['/',location.pathname||'/'];document.cookie.split(';').forEach(function(p){{var k=p.split('=')[0].trim();if(!k)return;if(w&&k!==w)return;for(var d=0;d<doms.length;d++){{for(var i=0;i<paths.length;i++){{document.cookie=k+'=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path='+paths[i]+doms[d];}}}}}});return 'ok';}}catch(e){{return String(e);}}}})()",
+        );
+        let _ = self.ops.evaluate_js(handle, &js);
         self.with_tab(tab, |t| {
             t.cookies.retain(|c| {
                 let d_match = domain.map(|d| c.domain == d).unwrap_or(true);
@@ -650,25 +853,53 @@ impl BrowserEngine for WebViewEngine {
     }
 
     fn storage_get(&self, tab: TabId, key: &str) -> Result<Option<String>> {
-        self.read_tab(tab, |t| t.storage.get(key).cloned())
+        let handle = self.read_tab(tab, |t| t.handle)?;
+        // Read the PAGE's localStorage (the tools must see what page JS sees).
+        let k = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".into());
+        let js =
+            format!("(()=>{{try{{return localStorage.getItem({k});}}catch(e){{return null;}}}})()");
+        let v = self.ops.evaluate_js(handle, &js)?;
+        Ok(v.as_str().map(|s| s.to_string()))
     }
 
     fn storage_set(&self, tab: TabId, key: &str, value: &str) -> Result<()> {
-        self.with_tab(tab, |t| {
-            t.storage.insert(key.to_string(), value.to_string());
-            Ok(())
-        })
+        let handle = self.read_tab(tab, |t| t.handle)?;
+        let k = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".into());
+        let v = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
+        let js = format!(
+            "(()=>{{try{{localStorage.setItem({k},{v});return 'ok';}}catch(e){{return String(e);}}}})()"
+        );
+        let out = self.ops.evaluate_js(handle, &js)?;
+        if let Some(s) = out.as_str() {
+            if s != "ok" {
+                return Err(EngineError::new(ErrorKind::Io, format!("storage_set: {s}")));
+            }
+        }
+        Ok(())
     }
 
     fn storage_all(&self, tab: TabId) -> Result<HashMap<String, String>> {
-        self.read_tab(tab, |t| t.storage.clone())
+        let handle = self.read_tab(tab, |t| t.handle)?;
+        let js = "(()=>{var o={};try{for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);o[k]=localStorage.getItem(k);}}catch(e){}return o;})()";
+        let v = self.ops.evaluate_js(handle, js)?;
+        let mut out = HashMap::new();
+        if let Some(obj) = v.as_object() {
+            for (k, val) in obj {
+                if let Some(s) = val.as_str() {
+                    out.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn storage_clear(&self, tab: TabId) -> Result<()> {
-        self.with_tab(tab, |t| {
-            t.storage.clear();
-            Ok(())
-        })
+        let handle = self.read_tab(tab, |t| t.handle)?;
+        let _ = self.ops.evaluate_js(
+            handle,
+            "(()=>{try{localStorage.clear();}catch(e){}return true;})()",
+        )?;
+        Ok(())
     }
 
     fn block_requests(&self, _tab: TabId, _patterns: &[String], _enabled: bool) -> Result<()> {
@@ -692,6 +923,15 @@ impl BrowserEngine for WebViewEngine {
                     .drain(..)
                     .collect()
             })
+            .unwrap_or_default()
+    }
+
+    fn recent_events(&self, tab: TabId) -> Vec<PageEvent> {
+        self.logs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&tab)
+            .map(|q| q.iter().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -824,6 +1064,85 @@ mod tests {
         assert!(scripts.iter().any(|s| s.contains("el.value=")));
         assert!(scripts.iter().any(|s| s.contains("el.checked=true")));
         assert!(scripts.iter().any(|s| s.contains("data-fb=\"a\"")));
+    }
+
+    #[test]
+    fn select_option_matches_value_text_or_label() {
+        let (e, log) = engine();
+        let tab = e
+            .create_tab("https://fake.example", &TabOptions::default())
+            .unwrap();
+        e.select_option(tab, &ElementRef::snapshot('a'), "Green")
+            .unwrap();
+        let scripts = log.lock().unwrap();
+        assert!(
+            scripts
+                .iter()
+                .any(|s| s.contains("op.text") && s.contains("op.label") && s.contains("nomatch")),
+            "select_option must match by value/text/label and report nomatch"
+        );
+    }
+
+    #[test]
+    fn execute_xpath_handles_scalar_results() {
+        let (e, log) = engine();
+        let tab = e
+            .create_tab("https://fake.example", &TabOptions::default())
+            .unwrap();
+        let _ = e.execute_xpath(tab, "count(//a)");
+        let scripts = log.lock().unwrap();
+        assert!(
+            scripts
+                .iter()
+                .any(|s| s.contains("XPathResult.ANY_TYPE") && s.contains("NUMBER_TYPE")),
+            "execute_xpath must request ANY_TYPE and handle scalars"
+        );
+    }
+
+    #[test]
+    fn storage_tools_touch_the_page_localstorage() {
+        let (e, log) = engine();
+        let tab = e
+            .create_tab("https://fake.example", &TabOptions::default())
+            .unwrap();
+        e.storage_set(tab, "k", "v").unwrap();
+        let _ = e.storage_get(tab, "k");
+        let _ = e.storage_all(tab);
+        e.storage_clear(tab).unwrap();
+        let scripts = log.lock().unwrap();
+        assert!(
+            scripts.iter().any(|s| s.contains("localStorage.setItem")),
+            "storage_set must write the page's localStorage"
+        );
+        assert!(
+            scripts.iter().any(|s| s.contains("localStorage.getItem")),
+            "storage_get must read the page's localStorage"
+        );
+    }
+
+    #[test]
+    fn cookie_clear_expires_with_domain_variants() {
+        let (e, log) = engine();
+        let tab = e
+            .create_tab("https://fake.example", &TabOptions::default())
+            .unwrap();
+        e.cookie_clear(tab, None, None).unwrap();
+        let scripts = log.lock().unwrap();
+        assert!(
+            scripts
+                .iter()
+                .any(|s| s.contains("document.cookie") && s.contains("domain=")),
+            "cookie_clear must expire cookies across domain/path variants"
+        );
+    }
+
+    #[test]
+    fn page_url_reads_live_location() {
+        let (e, _) = engine();
+        let tab = e
+            .create_tab("https://fake.example", &TabOptions::default())
+            .unwrap();
+        assert_eq!(e.page_url(tab).unwrap(), "https://fake.example");
     }
 
     #[test]

@@ -74,7 +74,7 @@ impl SessionManager {
         let p = self.profiles.get_mut(&id).ok_or_else(|| {
             EngineError::new(
                 ErrorKind::InvalidArgument,
-                format!("profile {id:?} not found"),
+                format!("profile {} not found", id.0),
             )
         })?;
         p.context = context;
@@ -90,7 +90,7 @@ impl SessionManager {
         self.profiles.remove(&id).ok_or_else(|| {
             EngineError::new(
                 ErrorKind::InvalidArgument,
-                format!("profile {id:?} not found"),
+                format!("profile {} not found", id.0),
             )
         })?;
         self.history.remove(&id);
@@ -113,7 +113,7 @@ impl SessionManager {
         if !self.profiles.contains_key(&id) {
             return Err(EngineError::new(
                 ErrorKind::InvalidArgument,
-                format!("profile {id:?} not found"),
+                format!("profile {} not found", id.0),
             ));
         }
         self.active_profile = Some(id);

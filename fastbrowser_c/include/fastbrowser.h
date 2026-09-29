@@ -197,6 +197,36 @@ typedef struct FbWebViewOps {
 /* Registers the host WebView ops table. Returns 0 on success. */
 int fastbrowser_register_webview_ops(const FbWebViewOps *ops);
 
+/* ── Native accessibility / desktop surface (mobile host bridge) ──
+ *
+ * The host (e.g. Android AccessibilityService via JNI) implements native UI
+ * tree reading / actions. Complex payloads cross the boundary as UTF-8 JSON
+ * (the kernel types are all Serialize/Deserialize):
+ *   capabilities()          -> SurfaceCapabilities JSON
+ *   list()                  -> [SurfaceInfo] JSON
+ *   snapshot(target, opts)  -> SurfaceSnapshot JSON   (opts = SnapshotOptions)
+ *   act(ref, action)        -> optional info JSON (may be NULL)
+ *   input(target, event)    -> 0 on success           (event = InputEvent)
+ *   screenshot(target)      -> {"width","height","base64"} JSON
+ *   poll_events(target)     -> [SurfaceEvent] JSON
+ *
+ * Returned strings are malloc'd; the kernel frees them via free_string.
+ * Any callback may be NULL (that capability is then reported unsupported).
+ */
+typedef struct FbSurfaceOps {
+    char *(*capabilities)(void);
+    char *(*list)(void);
+    char *(*snapshot)(const char *target, const char *opts_json);
+    char *(*act)(const char *ref, const char *action_json);
+    int (*input)(const char *target, const char *event_json);
+    char *(*screenshot)(const char *target);
+    char *(*poll_events)(const char *target);
+    void (*free_string)(char *ptr);
+} FbSurfaceOps;
+
+/* Registers the host surface ops table. Returns 0 on success. */
+int fastbrowser_register_surface_ops(const FbSurfaceOps *ops);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

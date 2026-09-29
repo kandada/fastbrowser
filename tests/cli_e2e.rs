@@ -214,6 +214,8 @@ fn missing_required_args_error_json() {
         &["--engine", "mock", "execute_js"][..],
         &["--engine", "mock", "wait_for_element"][..],
         &["--engine", "mock", "done"][..],
+        &["--engine", "mock", "download"][..],
+        &["--engine", "mock", "download", "https://example.com/x"][..],
     ] {
         let out = Command::new(bin()).args(args).output().unwrap();
         assert!(!out.status.success(), "args {args:?} should fail");
@@ -348,6 +350,46 @@ fn unknown_engine_and_command_error_shapes() {
         .as_str()
         .unwrap()
         .contains("unknown command"));
+    // 未知命令应带 usage 提示
+    assert!(err["error"]["message"].as_str().unwrap().contains("--help"));
+}
+
+// ── 新 E2E：download 落盘（真实 HTTP + 二进制）───────────────
+
+#[test]
+fn cli_download_writes_binary_file() {
+    use std::io::Read;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let payload: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x00, 0xFF, 0x80, 0x01];
+    let body = payload.clone();
+    std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf);
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(header.as_bytes());
+            let _ = sock.write_all(&body);
+        }
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pic.png");
+    let v = one(&[
+        "--engine",
+        "mock",
+        "download",
+        &format!("http://127.0.0.1:{port}/pic.png"),
+        path.to_str().unwrap(),
+    ]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["bytes"], payload.len(), "{v}");
+    assert_eq!(v["content_type"], "image/png", "{v}");
+    assert_eq!(std::fs::read(&path).unwrap(), payload);
 }
 
 // ── 新 E2E：info / version ───────────────────────────────────

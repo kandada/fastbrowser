@@ -43,16 +43,63 @@ fn done() -> Tool {
 fn send_keys() -> Tool {
     Tool::new(
         "send_keys",
-        "Send a key or a key-combo to the active tab. Supports modifiers: Ctrl, Alt, Shift, Meta (e.g. \"Ctrl+a\", \"Shift+Enter\", \"Enter\").",
+        "Send a key or a key-combo to the active tab. Supports modifiers: Ctrl, Alt, Shift, Meta (e.g. \"Ctrl+a\", \"Shift+Enter\", \"Enter\"). Plain text (e.g. \"hello\") is inserted into the focused field.",
         json!({"keys": {"type": "string", "description": "Key or combo, e.g. \"Ctrl+a\"", "required": true}}),
         r#"{"keys": "Ctrl+a"}"#,
         |ctx| {
             let tab = ctx.target_tab()?;
             let keys = ctx.param_str("keys")?;
+            // Plain text (no '+', not a special key) is inserted into the focused
+            // element: synthetic key events carry no text on the mobile WebView,
+            // so `send_keys "bob"` used to do nothing.
+            if !keys.contains('+') && !is_special_key(&keys) {
+                let text = serde_json::to_string(&keys).unwrap_or_else(|_| "\"\"".into());
+                let js = format!(
+                    "(function(){{var el=document.activeElement;if(!el)return false;if(el.isContentEditable){{document.execCommand('insertText',false,{text});return true;}}if('value' in el){{el.value+={text};el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return true;}}return false;}})()"
+                );
+                let _ = ctx.eval_opt(tab, &js);
+                return Ok(json!({"keys": keys, "inserted": true, "ok": true}));
+            }
             dispatch_combo(ctx, tab, &keys)?;
             Ok(json!({"keys": keys, "ok": true}))
         },
     )
+}
+
+/// A key named like a navigation/control key (kept as a key event); anything
+/// else with no `+` is treated as literal text by `send_keys`.
+fn is_special_key(k: &str) -> bool {
+    let l = k.to_ascii_lowercase();
+    matches!(
+        l.as_str(),
+        "enter"
+            | "tab"
+            | "escape"
+            | "esc"
+            | "backspace"
+            | "delete"
+            | "del"
+            | "insert"
+            | "arrowup"
+            | "arrowdown"
+            | "arrowleft"
+            | "arrowright"
+            | "up"
+            | "down"
+            | "left"
+            | "right"
+            | "home"
+            | "end"
+            | "pageup"
+            | "pagedown"
+            | "space"
+            | "control"
+            | "ctrl"
+            | "shift"
+            | "alt"
+            | "meta"
+            | "cmd"
+    ) || (l.len() >= 2 && l.starts_with('f') && l[1..].chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Split "Ctrl+a" / "Shift+Enter" / "Enter" into down/up event sequences and dispatch them.

@@ -81,6 +81,61 @@ impl WebViewOps for NoopWebViewOps {
     }
 }
 
+/// 宿主原生无障碍 / 桌面表面操作（移动端桥）。
+///
+/// 与 [`WebViewOps`] 同构：Android 由宿主（Kotlin `AccessibilityService`，经 JNI）
+/// 或其它平台提供，通过 `sdk::plugin::register_surface_ops` 注入；Rust 侧只定义协议。
+///
+/// 跨边界一律用 JSON 字符串，因为树/动作等内核类型均 `Serialize`/`Deserialize`，
+/// 这样 C ABI / JNI 只需最少的函数指针，减少平台耦合。
+pub trait SurfaceOps: Send + Sync {
+    /// 能力位（`SurfaceCapabilities` 的 JSON）。
+    fn capabilities(&self) -> Result<String>;
+    /// 枚举可用表面（`Vec<SurfaceInfo>` 的 JSON）。
+    fn list(&self) -> Result<String>;
+    /// 生成快照（`SurfaceSnapshot` 的 JSON）；`opts_json` 为 `SnapshotOptions` 的 JSON。
+    fn snapshot(&self, target: &str, opts_json: &str) -> Result<String>;
+    /// 对元素 ref 施动作（`SurfaceAction` 的 JSON）。返回可选信息 JSON（可为空串）。
+    fn act(&self, ref_: &str, action_json: &str) -> Result<String>;
+    /// 坐标级输入（`InputEvent` 的 JSON）。默认不支持。
+    fn input(&self, target: &str, event_json: &str) -> Result<()> {
+        let _ = (target, event_json);
+        Err(EngineError::unsupported(
+            "SurfaceOps host did not implement input",
+        ))
+    }
+    /// 截图（返回 `{"width":..,"height":..,"base64":".."}` 的 JSON）。默认不支持。
+    fn screenshot(&self, target: &str) -> Result<String> {
+        let _ = target;
+        Err(EngineError::unsupported(
+            "SurfaceOps host did not implement screenshot",
+        ))
+    }
+    /// 拉取自上次调用以来的事件（`Vec<SurfaceEvent>` 的 JSON）。默认空。
+    fn poll_events(&self, target: &str) -> Result<String> {
+        let _ = target;
+        Ok("[]".to_string())
+    }
+}
+
+/// 占位实现：未注入宿主 ops 时的兜底。
+pub struct NoopSurfaceOps;
+
+impl SurfaceOps for NoopSurfaceOps {
+    fn capabilities(&self) -> Result<String> {
+        Err(EngineError::unsupported("no SurfaceOps plugin registered"))
+    }
+    fn list(&self) -> Result<String> {
+        Err(EngineError::unsupported("no SurfaceOps plugin registered"))
+    }
+    fn snapshot(&self, _target: &str, _opts_json: &str) -> Result<String> {
+        Err(EngineError::unsupported("no SurfaceOps plugin registered"))
+    }
+    fn act(&self, _ref_: &str, _action_json: &str) -> Result<String> {
+        Err(EngineError::unsupported("no SurfaceOps plugin registered"))
+    }
+}
+
 /// 页面事件推送回调（供宿主展示思考过程 / 驱动 UI）。
 pub trait PageEventSink: Send + Sync {
     fn on_page_event(&self, tab: TabId, event: &PageEvent);
@@ -124,5 +179,18 @@ mod tests {
         let s: Arc<dyn PageEventSink> = Arc::new(Sink);
         let ev = PageEvent::DomChanged;
         s.on_page_event(TabId(1), &ev);
+    }
+
+    #[test]
+    fn noop_surface_ops_errors() {
+        let ops = NoopSurfaceOps;
+        assert!(ops.capabilities().is_err());
+        assert!(ops.list().is_err());
+        assert!(ops.snapshot("desktop:1", "{}").is_err());
+        assert!(ops.act("desktop:1:0", r#"{"kind":"click"}"#).is_err());
+        // Defaults are overridable but report unsupported / empty.
+        assert!(ops.input("desktop:1", "{}").is_err());
+        assert!(ops.screenshot("desktop:1").is_err());
+        assert_eq!(ops.poll_events("desktop:1").unwrap(), "[]");
     }
 }

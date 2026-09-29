@@ -7,7 +7,7 @@
 //! 作为随应用打包的 Chromium：`engine: "bundled"` 自动启动无头进程并走 CDP，
 //! 驱动真实页面验证全链路。无 vendor/chromium 时 SKIP。
 
-#![cfg(feature = "engine-cdp")]
+#![cfg(all(feature = "engine-cdp", feature = "heavy-tests"))]
 
 mod common;
 

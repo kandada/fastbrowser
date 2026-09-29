@@ -44,9 +44,14 @@ Commands (output is JSON):
   fill_form <json> | select_option <id> <value> | checkbox <id> <bool> | radio <id>
   cookie_get [domain] | cookie_set <json> | cookie_clear [domain] | storage_get <key> | storage_set <key> <value>
   execute_js <script> | evaluate_xpath <expr> | inject_css <css>
+  download <url> <path> | save_as_pdf <path> | search <query> [limit]
   block_request <pattern>... [off] | intercept_request <pattern>... [off]
   new_tab <url> | close_tab [tab] | switch_tab <tab> | list_tabs | get_active_tab
   tools | status | info
+
+Accessibility (with feature `surface`):
+  ax_list | ax_snapshot [target] | ax_click <ref> | ax_type <ref> <text>
+  ax_act <ref> <action> [json] | ax_scroll <ref> <dy> | ax_events [target]
 "#;
 
 fn main() {
@@ -603,6 +608,56 @@ fn dispatch(sdk: &Fastbrowser, cmd: &str, args: &[String]) -> fastbrowser::engin
         }
         "clear_state" => sdk.clear_state(),
 
+        // ── Accessibility（feature `surface`）──────────────────────────
+        #[cfg(feature = "surface")]
+        "ax_list" | "surface_list" | "list_surfaces" => simple!("ax_list"),
+        #[cfg(feature = "surface")]
+        "ax_snapshot" | "surface_snapshot" => {
+            let target = args.first().cloned().unwrap_or_default();
+            sdk.tool_call("ax_snapshot", params(json!({"target": target})))
+        }
+        #[cfg(feature = "surface")]
+        "ax_click" | "surface_click" => {
+            let r = need(args, 0, "ax_click <ref>")?;
+            sdk.tool_call("ax_click", params(json!({"ref": r})))
+        }
+        #[cfg(feature = "surface")]
+        "ax_type" | "surface_type" => {
+            let r = need(args, 0, "ax_type <ref> <text>")?;
+            let text = need(args, 1, "ax_type <ref> <text>")?;
+            sdk.tool_call("ax_type", params(json!({"ref": r, "text": text})))
+        }
+        #[cfg(feature = "surface")]
+        "ax_scroll" | "surface_scroll" => {
+            let r = need(args, 0, "ax_scroll <ref> <dy>")?;
+            let dy = args
+                .get(1)
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(300.0);
+            sdk.tool_call("ax_scroll", params(json!({"ref": r, "dy": dy})))
+        }
+        #[cfg(feature = "surface")]
+        "ax_events" | "surface_events" => {
+            let target = args.first().cloned().unwrap_or_default();
+            sdk.tool_call("ax_events", params(json!({"target": target})))
+        }
+        #[cfg(feature = "surface")]
+        "ax_act" | "surface_act" => {
+            let r = need(args, 0, "ax_act <ref> <action> [json]")?;
+            let action = need(args, 1, "ax_act <ref> <action> [json]")?;
+            let extra: Value = args
+                .get(2)
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or(Value::Object(Default::default()));
+            let mut p = json!({"ref": r, "action": action});
+            if let (Some(obj), Some(extra)) = (p.as_object_mut(), extra.as_object()) {
+                for (k, v) in extra {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+            sdk.tool_call("ax_act", p)
+        }
+
         "fill_form" => {
             let v = need(args, 0, "fill_form <json>")?;
             let parsed: Value =
@@ -758,6 +813,12 @@ fn dispatch(sdk: &Fastbrowser, cmd: &str, args: &[String]) -> fastbrowser::engin
             )
         }
 
+        "download" => {
+            let url = need(args, 0, "download <url> <path>")?;
+            let path = need(args, 1, "download <url> <path>")?;
+            sdk.tool_call("download", params(json!({"url": url, "path": path})))
+        }
+
         "tools" => Ok(sdk.tool_list()),
         "status" => Ok(sdk.status()),
         "info" => Ok(sdk.get_info().to_json()),
@@ -768,7 +829,7 @@ fn dispatch(sdk: &Fastbrowser, cmd: &str, args: &[String]) -> fastbrowser::engin
         }
         _ => Err(fastbrowser::engine::EngineError::new(
             fastbrowser::engine::ErrorKind::InvalidArgument,
-            format!("unknown command '{cmd}'"),
+            format!("unknown command '{cmd}' (run 'fastbrowser --help' for usage)"),
         )),
     }
 }

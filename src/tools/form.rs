@@ -5,6 +5,7 @@
 
 use serde_json::{json, Value};
 
+use crate::engine::Capability;
 use crate::tools::tool::Tool;
 
 pub fn tools() -> Vec<Tool> {
@@ -33,7 +34,8 @@ fn extract_forms() -> Tool {
                 .filter(|e| matches!(e.tag.as_str(), "input" | "select" | "textarea" | "button"))
                 .map(|e| {
                     json!({
-                        "id": e.id.to_string(),
+                        "id": e.display_id(),
+                        "dom_id": e.attrs.get("id").cloned(),
                         "tag": e.tag,
                         "name": e.attrs.get("name").cloned().unwrap_or_default(),
                         "input_type": e.input_type,
@@ -53,7 +55,7 @@ fn extract_forms() -> Tool {
 fn fill_form() -> Tool {
     Tool::new(
         "fill_form",
-        "Fill multiple fields at once. 'values' maps snapshot ids to text, e.g. {\"a\":\"alice\",\"b\":\"pw\"}.",
+        "Fill multiple fields at once. 'values' maps each field to text. Keys may be snapshot ids (single letter, e.g. {\"a\":\"alice\"}), CSS/Playwright selectors ({\"#name\":\"alice\"}), or a field name/`[name=...]` ({\"username\":\"alice\"}); snapshot ids only resolve right after a snapshot() — prefer selectors for stability.",
         json!({"values": {"type": "object", "required": true}}),
         r#"{"values": {"a": "alice", "b": "secret"}}"#,
         |ctx| {
@@ -61,16 +63,14 @@ fn fill_form() -> Tool {
             let values: serde_json::Map<String, Value> = ctx.param("values")?;
             let mut filled = Vec::new();
             for (k, v) in values {
-                let c = k.chars().next().unwrap_or('?');
                 let text = v.as_str().ok_or_else(|| {
                     crate::engine::EngineError::new(
                         crate::engine::ErrorKind::InvalidArgument,
-                        format!("fill_form value for '{k}' must be a string, got {v:?}"),
+                        format!("fill_form value for '{k}' must be a string, got {}", v),
                     )
                 })?;
-                ctx.runtime
-                    .engine()
-                    .set_element_value(tab, &crate::engine::ElementRef::snapshot(c), text)?;
+                let r = fill_target(&k);
+                ctx.runtime.engine().set_element_value(tab, &r, text)?;
                 filled.push(k);
             }
             Ok(json!({"filled": filled, "ok": true}))
@@ -78,18 +78,73 @@ fn fill_form() -> Tool {
     )
 }
 
+/// Resolve a `fill_form` key to an element target. A single letter is a snapshot
+/// id (back-compat); anything else is treated as an explicit selector, or a
+/// field name matched via `#name` / `[name="name"]`.
+fn fill_target(k: &str) -> crate::engine::ElementRef {
+    use crate::engine::ElementRef;
+    let mut it = k.chars();
+    if let (Some(c), None) = (it.next(), it.next()) {
+        if c.is_ascii_alphabetic() {
+            return ElementRef::snapshot(c);
+        }
+    }
+    if let Some(rest) = k.strip_prefix("css=") {
+        return ElementRef::css(rest);
+    }
+    if let Some(rest) = k.strip_prefix("text=") {
+        return ElementRef::text(rest);
+    }
+    if let Some(rest) = k.strip_prefix("role=") {
+        return ElementRef::role(rest);
+    }
+    if k.starts_with('#')
+        || k.starts_with('.')
+        || k.starts_with('[')
+        || k.starts_with("//")
+        || k.contains(">>")
+    {
+        return ElementRef::selector(k);
+    }
+    ElementRef::selector(format!("#{k}, [name=\"{k}\"]"))
+}
+
 fn select_option() -> Tool {
     Tool::new(
         "select_option",
-        "Select an <option> value from a <select> element (by 'id' or 'ref').",
+        "Select an <option> from a <select> (by 'selector', 'ref' or snapshot 'id'). Provide 'value' (the option value, e.g. \"g\"), 'label' (the visible text, e.g. \"Green\"), or 'values' (array, first used) — Playwright MCP sends 'values'.",
         json!({
+            "selector": {"type": "string", "required": false},
             "id": {"type": "string", "required": false},
-            "value": {"type": "string", "required": true}
+            "ref": {"type": "string", "required": false},
+            "value": {"type": "string", "required": false},
+            "label": {"type": "string", "required": false},
+            "values": {"type": "array", "items": {"type": "string"}, "required": false}
         }),
-        r#"{"id": "e", "value": "pro"}"#,
+        r#"{"selector": "select#lang", "value": "pro"}"#,
         |ctx| {
             let tab = ctx.target_tab()?;
-            let value = ctx.param_str("value")?;
+            let value = match ctx.params.get("value").and_then(|v| v.as_str()) {
+                Some(v) if !v.is_empty() => v.to_string(),
+                _ => ctx
+                    .params
+                    .get("values")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        ctx.params
+                            .get("label")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                    })
+                    .ok_or_else(|| {
+                        crate::engine::EngineError::invalid("need 'value', 'label' or 'values'")
+                    })?,
+            };
             let r = ctx.element_ref()?;
             ctx.runtime.engine().select_option(tab, &r, &value)?;
             Ok(json!({"selected": value, "ok": true}))
@@ -100,12 +155,14 @@ fn select_option() -> Tool {
 fn upload_file() -> Tool {
     Tool::new(
         "upload_file",
-        "Set file(s) on an <input type=file> element (by 'id' or 'ref').",
+        "Set file(s) on an <input type=file> element (by 'selector', 'ref' or snapshot 'id').",
         json!({
+            "selector": {"type": "string", "required": false},
             "id": {"type": "string", "required": false},
+            "ref": {"type": "string", "required": false},
             "paths": {"type": "array", "items": {"type": "string"}, "required": true}
         }),
-        r#"{"id": "f", "paths": ["/tmp/a.pdf"]}"#,
+        r#"{"selector": "input[type=file]", "paths": ["/tmp/a.pdf"]}"#,
         |ctx| {
             let tab = ctx.target_tab()?;
             let paths: Vec<String> = ctx.param("paths")?;
@@ -114,17 +171,21 @@ fn upload_file() -> Tool {
             Ok(json!({"files": paths, "ok": true}))
         },
     )
+    // 文件选择输入需要宿主支持（webview 未实现 → 隐藏）。
+    .requires(&[Capability::FileInput])
 }
 
 fn checkbox() -> Tool {
     Tool::new(
         "checkbox",
-        "Set a checkbox's checked state (by 'id' or 'ref').",
+        "Set a checkbox's checked state (by 'selector', 'ref' or snapshot 'id').",
         json!({
+            "selector": {"type": "string", "required": false},
             "id": {"type": "string", "required": false},
+            "ref": {"type": "string", "required": false},
             "checked": {"type": "boolean", "default": true}
         }),
-        r#"{"id": "d", "checked": true}"#,
+        r#"{"selector": "input[type=checkbox]", "checked": true}"#,
         |ctx| {
             let tab = ctx.target_tab()?;
             let checked = ctx.param_opt::<bool>("checked")?.unwrap_or(true);
@@ -138,9 +199,13 @@ fn checkbox() -> Tool {
 fn radio() -> Tool {
     Tool::new(
         "radio",
-        "Select a radio button (by 'id' or 'ref').",
-        json!({"id": {"type": "string", "required": false}}),
-        r#"{"id": "d"}"#,
+        "Select a radio button (by 'selector', 'ref' or snapshot 'id').",
+        json!({
+            "selector": {"type": "string", "required": false},
+            "id": {"type": "string", "required": false},
+            "ref": {"type": "string", "required": false}
+        }),
+        r#"{"selector": "input[type=radio]"}"#,
         |ctx| {
             let tab = ctx.target_tab()?;
             let r = ctx.element_ref()?;
@@ -173,6 +238,21 @@ mod tests {
 
     fn call(tool: &Tool, r: &Runtime, params: Value) -> Result<Value> {
         tool.run(&ToolContext { runtime: r, params })
+    }
+
+    #[test]
+    fn fill_target_resolves_kinds() {
+        use crate::engine::RefKind;
+        assert_eq!(fill_target("a").kind, RefKind::Snapshot);
+        assert_eq!(fill_target("#x").kind, RefKind::Selector);
+        assert_eq!(fill_target("css=#y").kind, RefKind::Css);
+        let by_name = fill_target("username");
+        assert_eq!(by_name.kind, RefKind::Selector);
+        assert!(
+            by_name.value.contains("[name=\"username\"]"),
+            "{}",
+            by_name.value
+        );
     }
 
     #[test]
@@ -215,6 +295,15 @@ mod tests {
             Some("pro")
         );
         assert_eq!(snap.element_by_id('d').unwrap().checked, Some(true));
+    }
+
+    #[test]
+    fn select_option_accepts_label() {
+        let r = runtime();
+        // `label` is honored (previously the global label→value alias silently
+        // remapped it, and selecting a non-existent value reported false success).
+        let v = call(&select_option(), &r, json!({"id": "e", "label": "pro"})).unwrap();
+        assert_eq!(v["selected"], "pro");
     }
 
     #[test]

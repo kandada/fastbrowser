@@ -367,6 +367,11 @@ impl Fastbrowser {
             active_tab: st["active_tab"].as_u64().map(|v| v as u32),
             profiles: st["profiles"].as_array().map(|a| a.len()).unwrap_or(0),
             tools: self.tool_count(),
+            engines: ["mock", "chromium", "bundled", "cef", "webview"]
+                .iter()
+                .filter(|e| crate::engines::is_engine_built(e))
+                .map(|e| e.to_string())
+                .collect(),
         }
     }
 

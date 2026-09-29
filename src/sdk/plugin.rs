@@ -10,7 +10,28 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::engine::host::{EncodedFrameSink, HostPlugin, PageEventSink, ViewFrameSink, WebViewOps};
+use crate::engine::host::{
+    EncodedFrameSink, HostPlugin, PageEventSink, SurfaceOps, ViewFrameSink, WebViewOps,
+};
+
+// ── SurfaceOps（原生无障碍 / 桌面表面移动端桥）────────────────
+
+static SURFACE_OPS: OnceLock<Arc<dyn SurfaceOps>> = OnceLock::new();
+
+/// 注册宿主原生表面操作实现（仅一次）。仅 `surface-android` 等移动端特性需要。
+pub fn register_surface_ops(ops: Arc<dyn SurfaceOps>) -> crate::engine::Result<()> {
+    SURFACE_OPS.set(ops).map_err(|_| {
+        crate::engine::EngineError::new(
+            crate::engine::ErrorKind::Plugin,
+            "SurfaceOps already registered",
+        )
+    })
+}
+
+/// 取出已注册的 SurfaceOps（若已注册）。
+pub fn take_surface_ops() -> Option<Arc<dyn SurfaceOps>> {
+    SURFACE_OPS.get().cloned()
+}
 
 // ── WebViewOps（移动端桥）───────────────────────────────────────
 

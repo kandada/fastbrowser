@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{json, Value};
 
-use crate::engine::host::{PageEventSink, ViewFrameSink, WebViewOps};
+use crate::engine::host::{PageEventSink, SurfaceOps, ViewFrameSink, WebViewOps};
 use crate::engine::{EngineError, Image, InputEvent, Result, TabId, ViewFrame, Viewport};
 use crate::sdk::Fastbrowser;
 
@@ -504,6 +504,147 @@ pub unsafe extern "C" fn fastbrowser_register_webview_ops(ops: *const FbWebViewO
         ops: FbWebViewOps { ..*ops },
     });
     match crate::sdk::plugin::register_webview_ops(adapter) {
+        Ok(()) => 0,
+        Err(_) => -2,
+    }
+}
+
+// ── 原生无障碍 / 桌面表面 SurfaceOps 注入（C ABI 版）──────────
+
+/// C 侧原生表面操作函数表（对应 `host::SurfaceOps`）。
+///
+/// 树/动作等一律以 UTF-8 JSON 字符串跨边界：返回值为 malloc 的字符串
+/// （失败返回 NULL），由内核用 `free_string` 释放；`input` 返回 0 表示成功。
+#[repr(C)]
+pub struct FbSurfaceOps {
+    /// `SurfaceCapabilities` 的 JSON。
+    pub capabilities: Option<extern "C" fn() -> *mut c_char>,
+    /// `Vec<SurfaceInfo>` 的 JSON。
+    pub list: Option<extern "C" fn() -> *mut c_char>,
+    /// `SurfaceSnapshot` 的 JSON；`opts_json` 为 `SnapshotOptions`。
+    pub snapshot:
+        Option<extern "C" fn(target: *const c_char, opts_json: *const c_char) -> *mut c_char>,
+    /// 施加动作；`action_json` 为 `SurfaceAction`。返回可选信息 JSON（可为 NULL）。
+    pub act: Option<extern "C" fn(ref_: *const c_char, action_json: *const c_char) -> *mut c_char>,
+    /// 坐标输入；`event_json` 为 `InputEvent`。返回 0 成功。
+    pub input: Option<extern "C" fn(target: *const c_char, event_json: *const c_char) -> c_int>,
+    /// 截图；返回 `{"width","height","base64"}` JSON。
+    pub screenshot: Option<extern "C" fn(target: *const c_char) -> *mut c_char>,
+    /// 事件；返回 `Vec<SurfaceEvent>` JSON。
+    pub poll_events: Option<extern "C" fn(target: *const c_char) -> *mut c_char>,
+    /// 释放内核从上述回调拿到的字符串。
+    pub free_string: Option<extern "C" fn(ptr: *mut c_char)>,
+}
+
+struct CbSurfaceOps {
+    ops: FbSurfaceOps,
+}
+
+unsafe impl Send for CbSurfaceOps {}
+unsafe impl Sync for CbSurfaceOps {}
+
+impl CbSurfaceOps {
+    fn take(&self, ptr: *mut c_char) -> Result<String> {
+        if ptr.is_null() {
+            return Err(EngineError::new(
+                crate::engine::ErrorKind::Plugin,
+                "SurfaceOps callback returned null",
+            ));
+        }
+        let s = unsafe { CStr::from_ptr(ptr).to_str().map(|s| s.to_string()) }.map_err(|_| {
+            EngineError::new(crate::engine::ErrorKind::Plugin, "SurfaceOps bad utf8")
+        })?;
+        if let Some(f) = self.ops.free_string {
+            f(ptr);
+        }
+        Ok(s)
+    }
+}
+
+impl SurfaceOps for CbSurfaceOps {
+    fn capabilities(&self) -> Result<String> {
+        let cb = self
+            .ops
+            .capabilities
+            .ok_or_else(|| err_unsupported("surface.capabilities"))?;
+        self.take(cb())
+    }
+
+    fn list(&self) -> Result<String> {
+        let cb = self
+            .ops
+            .list
+            .ok_or_else(|| err_unsupported("surface.list"))?;
+        self.take(cb())
+    }
+
+    fn snapshot(&self, target: &str, opts_json: &str) -> Result<String> {
+        let cb = self
+            .ops
+            .snapshot
+            .ok_or_else(|| err_unsupported("surface.snapshot"))?;
+        let t = CString::new(target).map_err(|_| EngineError::invalid("target has nul"))?;
+        let o = CString::new(opts_json).map_err(|_| EngineError::invalid("opts has nul"))?;
+        self.take(cb(t.as_ptr(), o.as_ptr()))
+    }
+
+    fn act(&self, ref_: &str, action_json: &str) -> Result<String> {
+        let cb = self.ops.act.ok_or_else(|| err_unsupported("surface.act"))?;
+        let r = CString::new(ref_).map_err(|_| EngineError::invalid("ref has nul"))?;
+        let a = CString::new(action_json).map_err(|_| EngineError::invalid("action has nul"))?;
+        self.take(cb(r.as_ptr(), a.as_ptr()))
+    }
+
+    fn input(&self, target: &str, event_json: &str) -> Result<()> {
+        let cb = self
+            .ops
+            .input
+            .ok_or_else(|| err_unsupported("surface.input"))?;
+        let t = CString::new(target).map_err(|_| EngineError::invalid("target has nul"))?;
+        let e = CString::new(event_json).map_err(|_| EngineError::invalid("event has nul"))?;
+        let rc = cb(t.as_ptr(), e.as_ptr());
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(EngineError::new(
+                crate::engine::ErrorKind::Plugin,
+                "surface.input failed",
+            ))
+        }
+    }
+
+    fn screenshot(&self, target: &str) -> Result<String> {
+        let cb = self
+            .ops
+            .screenshot
+            .ok_or_else(|| err_unsupported("surface.screenshot"))?;
+        let t = CString::new(target).map_err(|_| EngineError::invalid("target has nul"))?;
+        self.take(cb(t.as_ptr()))
+    }
+
+    fn poll_events(&self, target: &str) -> Result<String> {
+        let Some(cb) = self.ops.poll_events else {
+            return Ok("[]".to_string());
+        };
+        let t = CString::new(target).map_err(|_| EngineError::invalid("target has nul"))?;
+        self.take(cb(t.as_ptr()))
+    }
+}
+
+/// 注册 C 侧 SurfaceOps（init 之前调用）。返回 0 表示成功。
+///
+/// # Safety
+/// `ops` 必须是有效且生命周期覆盖内核生命周期的 `FbSurfaceOps` 指针。
+#[no_mangle]
+pub unsafe extern "C" fn fastbrowser_register_surface_ops(ops: *const FbSurfaceOps) -> c_int {
+    if ops.is_null() {
+        return -1;
+    }
+    let ops = &*ops;
+    let adapter = Arc::new(CbSurfaceOps {
+        ops: FbSurfaceOps { ..*ops },
+    });
+    match crate::sdk::plugin::register_surface_ops(adapter) {
         Ok(()) => 0,
         Err(_) => -2,
     }

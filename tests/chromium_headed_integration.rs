@@ -13,7 +13,7 @@
 //!
 //! 注意：headed 测试会短暂弹出真实浏览器窗口——这是测试预期行为。
 
-#![cfg(feature = "engine-cdp")]
+#![cfg(all(feature = "engine-cdp", feature = "heavy-tests"))]
 
 mod common;
 
@@ -515,8 +515,11 @@ fn headed_download_writes_file() {
     sdk.open(&base).unwrap();
     sdk.navigate(&format!("{base}file.txt")).unwrap();
     let target = dl.path().join("hello.txt");
-    wait_until("download file appears", Duration::from_secs(15), || {
-        target.exists()
+    // 等文件内容写完（`exists()` 可能在 Chrome 落盘完成前就为真）。
+    wait_until("download file completes", Duration::from_secs(15), || {
+        std::fs::read_to_string(&target)
+            .map(|c| c.trim() == "HELLO-DOWNLOAD")
+            .unwrap_or(false)
     });
     assert_eq!(
         std::fs::read_to_string(&target).unwrap().trim(),

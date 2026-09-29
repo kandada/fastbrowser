@@ -65,6 +65,46 @@ pub struct Config {
     /// 默认关闭——某些无头浏览器（如 Chrome for Testing）不支持
     /// `Target.createBrowserContext`，开启后在不受支持的引擎上会自动降级。
     pub isolated_profiles: bool,
+    /// 电脑操作表面层配置（feature `surface` 生效）。
+    #[serde(default)]
+    pub surface: SurfaceConfig,
+}
+
+/// 表面层配置（`Config.surface`）。
+///
+/// - `enabled=false`：不装配表面层（surface 工具隐藏）。
+/// - `provider`：`auto`（浏览器 + 平台原生）/ `browser`（仅浏览器）/ `macos`
+///   （仅原生）/ `mock`（脚本化）/ `none`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SurfaceConfig {
+    pub enabled: bool,
+    pub provider: String,
+    /// 默认快照最大节点数（0 = 用内核默认）。
+    pub max_nodes: usize,
+    /// 默认快照最大深度（0 = 用内核默认）。
+    pub max_depth: usize,
+    /// 默认是否只保留有意义节点。
+    pub interesting_only: bool,
+    /// web 表面是否优先使用引擎原生 AX 树（CDP `Accessibility.getFullAXTree` +
+    /// 几何关联）；关闭则回退到注入 JS 的交互元素快照。
+    pub prefer_ax_tree: bool,
+    /// 单次表面操作超时（毫秒，0 = 内核默认）。
+    pub timeout_ms: u64,
+}
+
+impl Default for SurfaceConfig {
+    fn default() -> Self {
+        SurfaceConfig {
+            enabled: true,
+            provider: "auto".to_string(),
+            max_nodes: 0,
+            max_depth: 0,
+            interesting_only: true,
+            prefer_ax_tree: true,
+            timeout_ms: 0,
+        }
+    }
 }
 
 impl Default for Config {
@@ -92,6 +132,7 @@ impl Default for Config {
             network_ask_permission: false,
             auto_accept_dialogs: true,
             isolated_profiles: false,
+            surface: SurfaceConfig::default(),
         }
     }
 }
@@ -109,5 +150,18 @@ impl Config {
     pub fn hosted(mut self) -> Self {
         self.rendering_mode = RenderingMode::Hosted;
         self
+    }
+
+    /// 实际生效的 CDP 命令超时（毫秒）。
+    ///
+    /// `command_timeout_ms == 0` 表示“不限”，但完全不设上限会让卡死的命令
+    /// 永久挂起；因此取一个宽松的默认值（30s，与 Playwright 一致），既避免
+    /// 高负载下（如外部磁盘/多测试并行）真实命令被 5s 误杀，又保持有界。
+    pub fn effective_command_timeout_ms(&self) -> u64 {
+        if self.command_timeout_ms == 0 {
+            30_000
+        } else {
+            self.command_timeout_ms
+        }
     }
 }

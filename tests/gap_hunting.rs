@@ -85,8 +85,10 @@ fn empty_element_ref_errors() {
     assert!(s
         .tool_call("click", json!({"ref": {"value": "x"}}))
         .is_err());
-    // 同一元素 id 后跟多余字符：取首字母（与设计一致）
-    assert!(s.tool_call("click", json!({"id": "agarbage"})).is_ok());
+    // 单字母 id = 快照引用；多字符 id（非选择器）按元素 id 解析，不存在则报错
+    // （不再取首字母 → 避免静默点到错误元素）。
+    assert!(s.tool_call("click", json!({"id": "a"})).is_ok());
+    assert!(s.tool_call("click", json!({"id": "agarbage"})).is_err());
 }
 
 // ── 工具描述与实现一致性 ──────────────────────────────────────
@@ -816,19 +818,22 @@ fn audit_caps_oversized_results() {
     );
 }
 
-// ── 回归：截图编码格式（png/jpeg 直出，不支持时回落 RGBA）─────
+// ── 截图编码格式（png/jpeg 由默认实现用 `image` 编码，跨引擎通用）─────
 
 #[test]
-fn screenshot_format_falls_back_to_rgba_on_mock() {
+fn screenshot_format_is_encoded_on_mock() {
+    use base64::Engine;
     let s = sdk_open("https://example.com");
-    // mock 引擎无 capture_encoded → jpeg/png 请求回落为 RGBA（格式字段仍是 rgba）
-    for fmt in ["jpeg", "png"] {
+    for (fmt, magic) in [
+        ("jpeg", &[0xffu8, 0xd8, 0xff][..]),
+        ("png", &[0x89u8, 0x50, 0x4e, 0x47][..]),
+    ] {
         let v = s.tool_call("screenshot", json!({"format": fmt})).unwrap();
-        assert_eq!(
-            v["format"], "rgba",
-            "mock should fall back to rgba for {fmt}"
-        );
-        assert!(v["base64"].is_string());
+        assert_eq!(v["format"], fmt, "format honored");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(v["base64"].as_str().unwrap())
+            .unwrap();
+        assert!(bytes.starts_with(magic), "{fmt} magic mismatch");
     }
     // 默认 rgba 不变
     let v = s.tool_call("screenshot", json!({})).unwrap();

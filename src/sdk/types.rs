@@ -21,6 +21,10 @@ pub struct SdkInfo {
     pub active_tab: Option<u32>,
     pub profiles: usize,
     pub tools: usize,
+    /// Engine names compiled into this build (e.g. `["mock","chromium","bundled"]`).
+    /// Lets callers (and the `fastbrowser info` CLI) detect missing features
+    /// without launching a browser.
+    pub engines: Vec<String>,
 }
 
 impl SdkInfo {

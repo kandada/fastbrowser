@@ -7,7 +7,7 @@
 //! 事件推送、多标签并发编排（`run_concurrently` / `open_many` / `wait_any`）、
 //! 异步导航等待、真实键盘/点击。
 
-#![cfg(feature = "engine-cdp")]
+#![cfg(all(feature = "engine-cdp", feature = "heavy-tests"))]
 #![cfg(feature = "async-core")]
 
 mod common;

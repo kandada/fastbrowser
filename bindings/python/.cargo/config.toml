@@ -1,0 +1,10 @@
+# Build-time environment for the Python binding.
+#
+# ring (pulled in via ureq -> rustls) compiles aarch64 assembly that requires
+# the ACLE macro __ARM_ARCH. The manylinux aarch64 cross toolchain used by
+# maturin-action does not predefine it, so cross-building the
+# aarch64-unknown-linux-gnu wheel fails with
+#   asm_base.h:73:2: error: #error "ARM assembler must define __ARM_ARCH"
+# Define it for that target only (harmless for host/other targets).
+[env]
+CFLAGS_aarch64_unknown_linux_gnu = { value = "-D__ARM_ARCH=8", force = true }

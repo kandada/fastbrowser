@@ -17,9 +17,13 @@ pub mod inject;
 pub mod input;
 pub mod notify;
 pub mod snapshot;
+pub mod surface;
 pub mod tab;
 pub mod trait_;
 pub mod view;
+
+#[cfg(feature = "surface")]
+pub mod provider;
 
 pub use cookie::Cookie;
 pub use error::{EngineError, ErrorKind, Result};
@@ -34,12 +38,20 @@ pub use snapshot::{
     ElementRef, FrameSnapshot, ImageInfo, InteractiveElement, LinkInfo, PageSnapshot, RefKind,
     SnapshotMeta,
 };
+pub use surface::{
+    now_ms, prune, ref_namespace, ref_surface_id, SnapshotOptions, SurfaceAction,
+    SurfaceCapabilities, SurfaceEvent, SurfaceEventKind, SurfaceInfo, SurfaceKind, SurfaceSnapshot,
+    UiNode, UiState,
+};
 pub use tab::{ContextId, HistoryEntry, TabId, TabInfo, TabOptions};
 pub use trait_::{BrowserEngine, Capability, EngineCapabilities};
 pub use view::{
     EncodedViewFrame, FrameStreamOptions, Image, Rect, RenderingMode, ViewFrame, ViewHandle,
     Viewport,
 };
+
+#[cfg(feature = "surface")]
+pub use provider::{ProviderRegistry, SurfaceInput, SurfaceProvider, SurfaceRuntime};
 
 /// Per-tab event buffer cap. If the agent never calls `drain_events`, page events
 /// (navigation/requests/console/DOM mutations) may accumulate; cap it to bound memory

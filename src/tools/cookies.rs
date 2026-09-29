@@ -66,13 +66,20 @@ fn clear_storage() -> Tool {
 fn cookie_get() -> Tool {
     Tool::new(
         "cookie_get",
-        "Get cookies of the active tab, optionally filtered by 'domain'.",
-        json!({"domain": {"type": "string", "required": false}}),
+        "Get cookies of the active tab, optionally filtered by 'domain' and/or 'name'.",
+        json!({
+            "domain": {"type": "string", "required": false},
+            "name": {"type": "string", "required": false}
+        }),
         r#"{"domain": "example.com"}"#,
         |ctx| {
             let tab = ctx.target_tab()?;
             let domain = ctx.param_opt::<String>("domain")?;
-            let cookies = ctx.runtime.engine().cookie_get(tab, domain.as_deref())?;
+            let name = ctx.param_opt::<String>("name")?;
+            let mut cookies = ctx.runtime.engine().cookie_get(tab, domain.as_deref())?;
+            if let Some(n) = name.as_deref() {
+                cookies.retain(|c| c.name == n);
+            }
             Ok(json!({"cookies": cookies}))
         },
     )
@@ -81,19 +88,51 @@ fn cookie_get() -> Tool {
 fn cookie_set() -> Tool {
     Tool::new(
         "cookie_set",
-        "Set a cookie on the active tab. Params: name, value, domain, path?, expires?, secure?, http_only?, same_site?",
+        "Set a cookie on the active tab. Params: name, value, domain (or 'url' to derive the host), path?, expires?, secure?, http_only?, same_site?",
         json!({
             "name": {"type": "string", "required": true},
             "value": {"type": "string", "required": true},
-            "domain": {"type": "string", "required": true}
+            "domain": {"type": "string", "required": false},
+            "url": {"type": "string", "required": false}
         }),
-        r#"{"name": "session", "value": "abc", "domain": "example.com"}"#,
+        r#"{"name": "session", "value": "abc"}"#,
         |ctx| {
             let tab = ctx.target_tab()?;
+            let host_of = |u: &str| -> String {
+                u.split("://")
+                    .nth(1)
+                    .and_then(|r| r.split(['/', '?', '#']).next())
+                    .unwrap_or("")
+                    .rsplit('@')
+                    .next()
+                    .unwrap_or("")
+                    .split(':')
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let domain = match ctx.param_opt::<String>("domain")? {
+                Some(d) if !d.is_empty() => d,
+                _ => {
+                    // 'url' lets the caller set a cookie for a page other than
+                    // the active one; otherwise derive the host from the page.
+                    let source = match ctx.param_opt::<String>("url")? {
+                        Some(u) if !u.is_empty() => u,
+                        _ => ctx.runtime.engine().page_url(tab)?,
+                    };
+                    let host = host_of(&source);
+                    if host.is_empty() {
+                        return Err(crate::engine::EngineError::invalid(
+                            "cookie_set: 'domain' (or a valid 'url') is required (the current page has no host)",
+                        ));
+                    }
+                    host
+                }
+            };
             let cookie = Cookie {
                 name: ctx.param_str("name")?,
                 value: ctx.param_str("value")?,
-                domain: ctx.param_str("domain")?,
+                domain,
                 path: ctx.param_opt::<String>("path")?.unwrap_or_else(|| "/".into()),
                 expires: ctx.param_opt::<i64>("expires")?,
                 secure: ctx.param_opt::<bool>("secure")?.unwrap_or(false),
@@ -199,6 +238,21 @@ mod tests {
         let _ = call(&cookie_clear(), &r, json!({"domain": "example.com"}));
         let v = call(&cookie_get(), &r, json!({})).unwrap();
         assert_eq!(v["cookies"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn cookie_set_accepts_url() {
+        let r = runtime();
+        // 'url' derives the host when 'domain' is omitted.
+        let v = call(
+            &cookie_set(),
+            &r,
+            json!({"name": "u", "value": "1", "url": "https://api.example.org/path?q=1"}),
+        )
+        .unwrap();
+        assert_eq!(v["set"], "u");
+        let got = call(&cookie_get(), &r, json!({"domain": "api.example.org"})).unwrap();
+        assert_eq!(got["cookies"][0]["name"], "u");
     }
 
     #[test]

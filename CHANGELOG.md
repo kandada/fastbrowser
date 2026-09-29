@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09
+
+- `download` tool: fetch a URL straight to an absolute host path, byte-for-byte
+  (binary-safe) — exposed to the CLI (`download <url> <path>`), the SDK, and the
+  in-process routers in host shells.
+- Playwright MCP / browser-use compatibility: tool-name and parameter aliases
+  are resolved in the kernel (`tools::aliases`), so `browser_navigate`,
+  `go_to_url`, `click_element`, `expression`→`script`, etc. work everywhere.
+- `execute_js` accepts both expression-style scripts and statement blocks with a
+  top-level `return` (wrapped in an IIFE).
+- `search` falls back to `documentElement` when the document has no `<body>`
+  (e.g. a directly-opened SVG/XML document).
+
 ## [0.1.0] - 2026-09
 
 - Initial release.

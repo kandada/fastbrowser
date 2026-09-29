@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09
+
+- Version aligned with the kernel (`0.1.4`).
+- New `download` tool available through `FastBrowser.tool_call("download", ...)`.
+- Playwright MCP / browser-use tool-name and parameter aliases resolved by the
+  kernel, so calls through the Python binding accept those names too.
+
 ## [0.1.3] - 2026-09
 
 - Cross-platform wheels built in CI: Linux x86_64 + aarch64 (manylinux),

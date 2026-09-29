@@ -26,7 +26,7 @@ impl ChromiumCdpEngine {
     pub fn new(config: &Config) -> Result<CefEngine> {
         let host = host::CefHost::start(free_port()?)?;
         let ws_url = discover_page_ws(host.port)?;
-        let timeout = config.command_timeout_ms.max(5_000);
+        let timeout = config.effective_command_timeout_ms();
         Self::with_keep(&ws_url, config, timeout, Some(Box::new(host)))
     }
 }

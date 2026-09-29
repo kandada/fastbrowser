@@ -7,9 +7,11 @@
 
 pub mod advanced;
 pub mod agent;
+pub mod aliases;
 pub mod cookies;
 pub mod device;
 pub mod dialog;
+pub mod download;
 pub mod extract;
 pub mod form;
 pub mod interact;
@@ -21,6 +23,9 @@ pub mod registry;
 pub mod tabs;
 pub mod tool;
 pub mod wait;
+
+#[cfg(feature = "surface")]
+pub mod surface;
 
 pub use registry::ToolRegistry;
 pub use tool::{Tool, ToolContext, ToolSpec};

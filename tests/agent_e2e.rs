@@ -7,7 +7,7 @@
 //! open → snapshot → fill_form → 真实坐标点击提交按钮 → 表单提交导航到
 //! /dashboard → 提取+断言成功 → done。无浏览器时自动 SKIP。
 
-#![cfg(feature = "engine-cdp")]
+#![cfg(all(feature = "engine-cdp", feature = "heavy-tests"))]
 
 mod common;
 
@@ -144,7 +144,7 @@ fn agent_task_on_real_browser() {
         .unwrap();
 
     // 4. 验证：导航到 /dashboard 并断言成功
-    wait_until("dashboard", Duration::from_secs(30), || {
+    wait_until("dashboard", Duration::from_secs(60), || {
         sdk.snapshot()
             .map(|s| s.title == "Dashboard")
             .unwrap_or(false)

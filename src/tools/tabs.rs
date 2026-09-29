@@ -40,11 +40,24 @@ fn get_active_tab() -> Tool {
                 .list_tabs()
                 .into_iter()
                 .find(|t| t.id == tab);
+            // Overlay live url/title so cached metadata never looks stale.
+            let live_url = ctx
+                .runtime
+                .engine()
+                .page_url(tab)
+                .ok()
+                .filter(|u| !u.is_empty());
+            let live_title = ctx
+                .runtime
+                .engine()
+                .page_title(tab)
+                .ok()
+                .filter(|s| !s.is_empty());
             Ok(match info {
                 Some(t) => json!({
                     "tab": t.id.as_u32(),
-                    "url": t.url,
-                    "title": t.title,
+                    "url": live_url.unwrap_or(t.url),
+                    "title": live_title.unwrap_or(t.title),
                     "target_id": t.target_id,
                 }),
                 None => json!({ "tab": tab.as_u32() }),
@@ -56,26 +69,54 @@ fn get_active_tab() -> Tool {
 fn get_tab() -> Tool {
     Tool::new(
         "get_tab",
-        "Find a tab whose url or title contains the given substring. Returns tab info.",
-        json!({"url_contains": {"type": "string", "required": false}, "title_contains": {"type": "string", "required": false}}),
+        "Return info for one tab: by 'tab'/'id', or the first tab whose url/title contains 'url_contains'/'title_contains'.",
+        json!({
+            "tab": {"type": "integer", "required": false},
+            "id": {"type": "integer", "required": false},
+            "url_contains": {"type": "string", "required": false},
+            "title_contains": {"type": "string", "required": false}
+        }),
         r#"{"title_contains": "Search"}"#,
         |ctx| {
-            let url_needle = ctx.param_opt::<String>("url_contains")?;
-            let title_needle = ctx.param_opt::<String>("title_contains")?;
+            let explicit = ctx.param_opt::<u32>("tab")?.or(ctx.param_opt::<u32>("id")?);
             let tabs = ctx.runtime.engine().list_tabs();
-            let found = tabs.into_iter().find(|t| {
-                let u = url_needle
-                    .as_ref()
-                    .map(|n| t.url.contains(n))
-                    .unwrap_or(true);
-                let ti = title_needle
-                    .as_ref()
-                    .map(|n| t.title.contains(n))
-                    .unwrap_or(true);
-                u && ti
-            });
+            let found = match explicit {
+                Some(id) => tabs.into_iter().find(|t| t.id.as_u32() == id),
+                None => {
+                    let url_needle = ctx.param_opt::<String>("url_contains")?;
+                    let title_needle = ctx.param_opt::<String>("title_contains")?;
+                    tabs.into_iter().find(|t| {
+                        let u = url_needle
+                            .as_ref()
+                            .map(|n| t.url.contains(n))
+                            .unwrap_or(true);
+                        let ti = title_needle
+                            .as_ref()
+                            .map(|n| t.title.contains(n))
+                            .unwrap_or(true);
+                        u && ti
+                    })
+                }
+            };
             match found {
-                Some(t) => Ok(json!({"tab": t})),
+                Some(t) => {
+                    let mut entry = serde_json::to_value(&t).unwrap_or_else(|_| json!({}));
+                    // Overlay live url/title for the active tab (cached metadata
+                    // can lag right after navigation).
+                    if Some(t.id) == ctx.runtime.engine().active_tab() {
+                        if let Ok(u) = ctx.runtime.engine().page_url(t.id) {
+                            if !u.is_empty() {
+                                entry["url"] = json!(u);
+                            }
+                        }
+                        if let Ok(s) = ctx.runtime.engine().page_title(t.id) {
+                            if !s.is_empty() {
+                                entry["title"] = json!(s);
+                            }
+                        }
+                    }
+                    Ok(json!({"tab": entry}))
+                }
                 None => Err(crate::engine::EngineError::new(
                     crate::engine::ErrorKind::TabNotFound,
                     "no tab matches the given criteria",
@@ -135,6 +176,9 @@ fn new_tab() -> Tool {
         |ctx| {
             let url = ctx.param_str("url")?;
             let tab = ctx.runtime.open(&url)?;
+            // Ensure the host actually loads the URL: some hosts create a blank
+            // page and expect a follow-up navigate.
+            let _ = ctx.runtime.engine().navigate(tab, &url);
             Ok(json!({"tab": tab.as_u32(), "url": url}))
         },
     )
@@ -153,6 +197,7 @@ fn new_window() -> Tool {
                 ..Default::default()
             };
             let tab = ctx.runtime.engine().new_window(&url, &opts)?;
+            let _ = ctx.runtime.engine().navigate(tab, &url);
             Ok(json!({"tab": tab.as_u32(), "url": url}))
         },
     )
@@ -162,11 +207,14 @@ fn close_tab() -> Tool {
     Tool::new(
         "close_tab",
         "Close a tab (defaults to the active tab).",
-        json!({"tab": {"type": "integer", "required": false}}),
+        json!({
+            "tab": {"type": "integer", "required": false},
+            "id": {"type": "integer", "required": false}
+        }),
         r#"{"tab": 2}"#,
         |ctx| {
-            let tab = match ctx.tab_param()? {
-                Some(t) => t,
+            let tab = match ctx.param_opt::<u32>("tab")?.or(ctx.param_opt::<u32>("id")?) {
+                Some(n) => crate::engine::TabId(n),
                 None => ctx.active_tab()?,
             };
             ctx.runtime.engine().close_tab(tab)?;
@@ -178,11 +226,18 @@ fn close_tab() -> Tool {
 fn switch_tab() -> Tool {
     Tool::new(
         "switch_tab",
-        "Switch the active tab to 'tab'.",
-        json!({"tab": {"type": "integer", "required": true}}),
+        "Switch the active tab to 'tab' (alias: 'id').",
+        json!({
+            "tab": {"type": "integer", "required": false},
+            "id": {"type": "integer", "required": false}
+        }),
         r#"{"tab": 3}"#,
         |ctx| {
-            let tab = TabId(ctx.param::<u32>("tab")?);
+            let n = ctx
+                .param_opt::<u32>("tab")?
+                .or(ctx.param_opt::<u32>("id")?)
+                .ok_or_else(|| crate::engine::EngineError::invalid("need 'tab' or 'id'"))?;
+            let tab = TabId(n);
             ctx.runtime.engine().switch_tab(tab)?;
             Ok(json!({"active": tab.as_u32()}))
         },
@@ -196,8 +251,26 @@ fn list_tabs() -> Tool {
         json!({}),
         r#"{}"#,
         |ctx| {
+            let active = ctx.runtime.engine().active_tab();
             let tabs = ctx.runtime.engine().list_tabs();
-            Ok(json!({"tabs": tabs}))
+            let mut out = Vec::with_capacity(tabs.len());
+            for t in tabs {
+                let mut v = serde_json::to_value(&t).unwrap_or_else(|_| json!({}));
+                if Some(t.id) == active {
+                    if let Ok(u) = ctx.runtime.engine().page_url(t.id) {
+                        if !u.is_empty() {
+                            v["url"] = json!(u);
+                        }
+                    }
+                    if let Ok(s) = ctx.runtime.engine().page_title(t.id) {
+                        if !s.is_empty() {
+                            v["title"] = json!(s);
+                        }
+                    }
+                }
+                out.push(v);
+            }
+            Ok(json!({"tabs": out}))
         },
     )
 }
@@ -248,6 +321,7 @@ mod tests {
         let v = call(&get_active_tab(), &r, json!({})).unwrap();
         assert_eq!(v["tab"].as_u64().unwrap(), active.as_u32() as u64);
         assert!(v["url"].as_str().unwrap().contains("example.com"));
+        assert!(v.get("title").is_some(), "title missing: {v}");
     }
 
     #[test]
@@ -262,6 +336,21 @@ mod tests {
             active["url"].as_str().unwrap().contains("second.example"),
             "unexpected: {active}"
         );
+    }
+
+    #[test]
+    fn switch_and_get_tab_accept_id_alias() {
+        let r = runtime();
+        let v = call(&new_tab(), &r, json!({"url": "https://second.example/"})).unwrap();
+        let t2 = v["tab"].as_u64().unwrap() as u32;
+        // `id` is accepted as an alias for `tab` (LLMs commonly send `id`).
+        let _ = call(&switch_tab(), &r, json!({"id": t2}));
+        assert_eq!(r.engine().active_tab().unwrap().as_u32(), t2);
+        let got = call(&get_tab(), &r, json!({"id": t2})).unwrap();
+        assert_eq!(got["tab"]["id"].as_u64().unwrap(), t2 as u64);
+        // `tab` still works for get_tab.
+        let got = call(&get_tab(), &r, json!({"tab": t2})).unwrap();
+        assert_eq!(got["tab"]["id"].as_u64().unwrap(), t2 as u64);
     }
 
     #[test]

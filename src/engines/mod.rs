@@ -33,14 +33,38 @@ pub mod webview;
 /// 按配置创建引擎。
 ///
 /// `webview_ops` 在引擎为 "webview" / "webkit" 时需要（由 sdk 层注入宿主实现）。
+/// Normalize an engine name to its canonical form, accepting common aliases
+/// from other ecosystems (Playwright/Puppeteer call it `chromium`/`chrome`;
+/// `chrome-for-testing`/`cft` is our bundled build).
+pub fn normalize_engine(name: &str) -> String {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "chrome"
+        | "headless"
+        | "chromium-headless"
+        | "chromium-headless-shell"
+        | "chrome-headless"
+        | "chrome-headless-shell" => "chromium".to_string(),
+        "chrome-for-testing" | "cft" | "playwright-chromium" | "chromium-bundled" => {
+            "bundled".to_string()
+        }
+        "webkit" => "webview".to_string(),
+        // browser-brand spellings
+        "google-chrome" | "googlechrome" | "chromium-browser" | "chrome-beta" | "chrome-canary"
+        | "msedge" | "edge" | "edge-chromium" => "chromium".to_string(),
+        "safari" | "wkwebview" | "safari-ios" | "webkitgtk" | "wpe" => "webview".to_string(),
+        other => other.to_string(),
+    }
+}
+
 pub fn create_engine(
     config: &Config,
     webview_ops: Option<Arc<dyn WebViewOps>>,
 ) -> Result<Box<dyn BrowserEngine>> {
     #[cfg(not(feature = "engine-webview"))]
     let _ = &webview_ops;
+    let engine = normalize_engine(&config.engine);
     #[allow(unreachable_patterns)] // feature 关闭时的兜底分支
-    match config.engine.as_str() {
+    match engine.as_str() {
         "mock" => {
             crate::fb_log!("engine 'mock'");
             Ok(Box::new(mock::MockEngine::new()))
@@ -53,7 +77,7 @@ pub fn create_engine(
                     "engine 'chromium' requires config.cdp_url (a devtools ws endpoint)",
                 )
             })?;
-            let timeout = config.command_timeout_ms.max(5_000);
+            let timeout = config.effective_command_timeout_ms();
             cdp::ChromiumCdpEngine::connect(&url, config, timeout)
                 .map(|e| Box::new(e) as Box<dyn BrowserEngine>)
         }
@@ -112,7 +136,7 @@ fn create_auto_engine(
     let _ = &webview_ops;
     // 1. 显式 cdp_url → 尝试外部 Chromium
     if let Some(url) = &config.cdp_url {
-        let timeout = config.command_timeout_ms.max(3_000);
+        let timeout = config.effective_command_timeout_ms();
         if let Ok(e) = cdp::ChromiumCdpEngine::connect(url, config, timeout) {
             return Ok(Box::new(e) as Box<dyn BrowserEngine>);
         }
@@ -154,6 +178,8 @@ fn create_auto_engine(
 
 /// 引擎是否已编译。
 pub fn is_engine_built(engine: &str) -> bool {
+    let engine = normalize_engine(engine);
+    let engine = engine.as_str();
     engine == "mock"
         || engine == "auto"
         || ((engine == "bundled" || engine == "chromium") && cfg!(feature = "engine-cdp"))
@@ -333,5 +359,20 @@ mod tests {
             let r = create_engine(&cfg("webview"), None);
             assert!(r.is_err());
         }
+    }
+
+    #[test]
+    fn normalize_engine_aliases() {
+        assert_eq!(normalize_engine("chrome"), "chromium");
+        assert_eq!(normalize_engine("headless"), "chromium");
+        assert_eq!(normalize_engine("Chrome-Headless-Shell"), "chromium");
+        assert_eq!(normalize_engine("cft"), "bundled");
+        assert_eq!(normalize_engine("chrome-for-testing"), "bundled");
+        assert_eq!(normalize_engine("webkit"), "webview");
+        assert_eq!(normalize_engine("mock"), "mock");
+        assert_eq!(normalize_engine("auto"), "auto");
+        assert_eq!(normalize_engine("  Chromium  "), "chromium");
+        // is_engine_built accepts aliases.
+        assert_eq!(is_engine_built("chrome"), is_engine_built("chromium"));
     }
 }

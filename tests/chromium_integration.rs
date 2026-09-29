@@ -9,7 +9,7 @@
 //! 前置：本机存在 Chrome/Chromium（或用环境变量 `CHROME_PATH` 指定）。
 //! 未找到时打印 SKIP 并直接返回（不阻塞无浏览器环境的 CI）。
 
-#![cfg(feature = "engine-cdp")]
+#![cfg(all(feature = "engine-cdp", feature = "heavy-tests"))]
 
 mod common;
 
@@ -454,6 +454,123 @@ fn chromium_new_capabilities() {
 
     sdk.shutdown();
     eprintln!("PASS: chromium_new_capabilities");
+}
+
+/// `search` 在无 `<body>` 的文档（直接打开的 SVG/XML）上不应因
+/// `document.body` 为 null 而抛错——应回退到 `documentElement` 继续遍历。
+#[test]
+fn chromium_search_handles_bodyless_document() {
+    let Some(_) = common::find_chrome() else {
+        eprintln!("SKIP: chromium_search_handles_bodyless_document (no chrome)");
+        return;
+    };
+    let (_guard, ws) = setup();
+
+    // 以 image/svg+xml 提供的文档：document.body == null，根节点是 <svg>。
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = listener.try_clone().unwrap();
+    std::thread::spawn(move || {
+        for stream in server.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let svg = r##"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="200" height="80"><text x="10" y="40">NeedleText</text></svg>"##;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                svg.len(),
+                svg
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}/pic.svg");
+
+    let sdk = Fastbrowser::new();
+    let cfg = Config {
+        engine: "chromium".into(),
+        cdp_url: Some(ws.clone()),
+        ..Config::default()
+    };
+    sdk.init(cfg).unwrap();
+    sdk.open(&url).unwrap();
+
+    wait_until("svg loaded", Duration::from_secs(10), || {
+        sdk.tool_call(
+            "execute_js",
+            serde_json::json!({"script": "document.documentElement && document.documentElement.tagName"}),
+        )
+        .ok()
+        .and_then(|v| v["result"].as_str().map(|s| s.eq_ignore_ascii_case("svg")))
+        .unwrap_or(false)
+    });
+
+    let body = sdk
+        .tool_call(
+            "execute_js",
+            serde_json::json!({"script": "document.body === null"}),
+        )
+        .unwrap();
+    assert_eq!(body["result"], true, "expected a bodyless document: {body}");
+
+    let s = sdk
+        .tool_call("search", serde_json::json!({"query": "NeedleText"}))
+        .unwrap();
+    assert!(
+        s["count"].as_u64().unwrap_or(0) >= 1,
+        "search must fall back to documentElement: {s}"
+    );
+
+    sdk.shutdown();
+    eprintln!("PASS: chromium_search_handles_bodyless_document");
+}
+
+/// `execute_js` 同时接受表达式与含顶层 `return` 的语句块（后者自动包成 IIFE）。
+#[test]
+fn chromium_execute_js_expression_and_statement_block() {
+    let Some(_) = common::find_chrome() else {
+        eprintln!("SKIP: chromium_execute_js_expression_and_statement_block (no chrome)");
+        return;
+    };
+    let (_guard, ws) = setup();
+    let (_server, url) = serve_http(
+        r##"<!doctype html><html><head><title>JSWrap</title></head><body>
+          <div id="x">hi</div>
+        </body></html>"##,
+    );
+
+    let sdk = Fastbrowser::new();
+    let cfg = Config {
+        engine: "chromium".into(),
+        cdp_url: Some(ws.clone()),
+        ..Config::default()
+    };
+    sdk.init(cfg).unwrap();
+    sdk.open(&url).unwrap();
+    wait_until("page loaded", Duration::from_secs(10), || {
+        sdk.snapshot().map(|s| s.title == "JSWrap").unwrap_or(false)
+    });
+
+    // 表达式形态：原样求值。
+    let v = sdk
+        .tool_call(
+            "execute_js",
+            serde_json::json!({"script": "document.title"}),
+        )
+        .unwrap();
+    assert_eq!(v["result"], "JSWrap", "{v}");
+
+    // 语句块形态：顶层 `return` 被包进 IIFE，结果照常返回。
+    let v = sdk
+        .tool_call(
+            "execute_js",
+            serde_json::json!({"script": "const el = document.getElementById('x'); return el ? el.textContent : 'missing';"}),
+        )
+        .unwrap();
+    assert_eq!(v["result"], "hi", "{v}");
+
+    sdk.shutdown();
+    eprintln!("PASS: chromium_execute_js_expression_and_statement_block");
 }
 
 /// 同源 iframe + shadow DOM 快照/点击支持验证。
@@ -1739,8 +1856,11 @@ fn chromium_download_writes_file() {
     sdk.navigate(&format!("{base}file.txt")).unwrap();
 
     let target = std::path::Path::new(&dl_path).join("hello.txt");
-    wait_until("download file appears", Duration::from_secs(15), || {
-        target.exists()
+    // 等文件内容写完（`exists()` 可能在 Chrome 落盘完成前就为真，读到的仍是空文件）。
+    wait_until("download file completes", Duration::from_secs(15), || {
+        std::fs::read_to_string(&target)
+            .map(|c| c.trim() == "HELLO-DOWNLOAD")
+            .unwrap_or(false)
     });
     let content = std::fs::read_to_string(&target).unwrap();
     assert_eq!(

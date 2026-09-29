@@ -1,6 +1,6 @@
 [package]
 name = "fastbrowser"
-version = "0.1.3"
+version = "0.1.5"
 edition = "2021"
 description = "Cross-platform browser automation kernel for AI agents"
 license = "Apache-2.0"
@@ -30,6 +30,8 @@ path = "src/bin/main.rs"
 
 [features]
 default = ["engine-mock"]
+# 真 Chromium 的重型集成测试（默认不跑；用 scripts/cdp-full.sh 显式运行）
+heavy-tests = []
 # 内存参考引擎（无外部依赖，CLI/测试/文档示例开箱即用）
 engine-mock = []
 # 共享 CDP 客户端（websocket），被 cef 引擎复用，也可独立使用
@@ -46,17 +48,46 @@ async-core = ["dep:tokio"]
 engine-cef = ["dep:cef", "engine-cdp"]
 # 移动端系统 WebView 引擎（宿主提供 WebViewOps，经 sdk::plugin 注册）
 engine-webview = []
+# 电脑操作表面层（async-first）：统一 UiNode 模型 + async SurfaceProvider + 注册表 + 同步外壳。
+# 浏览器作为第一个 provider（web 表面）；平台原生后端另行 feature 门控。
+surface = ["dep:async-trait", "dep:tokio"]
+# macOS 原生无障碍后端（AXUIElement）+ 坐标输入（CGEvent）。仅 macOS 可编译。
+surface-macos = [
+    "surface",
+    "dep:accessibility",
+    "dep:accessibility-sys",
+    "dep:core-foundation",
+    "dep:core-graphics",
+]
+# Linux 原生无障碍后端（AT-SPI via zbus）。仅 Linux 可运行；可跨平台编译校验。
+surface-linux = ["surface", "dep:atspi"]
+# Windows 原生无障碍后端（UI Automation）。仅 Windows 可运行；可交叉 check。
+surface-windows = ["surface", "dep:uiautomation"]
+# 移动端原生无障碍后端（Android AccessibilityService）：内核侧 provider 只做协议
+# 适配，真实能力由 App（Kotlin）经 JNI/C ABI 以 SurfaceOps 注入。
+surface-android = ["surface"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 flate2 = "1.1"   # 极简 PNG 解码器（IDAT inflate）
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] } # screenshot 的 png/jpeg 编码
+ureq = { version = "2", default-features = false, features = ["tls"] } # download 工具：轻量 HTTPS 客户端
 cef = { version = "151", optional = true } # tauri-apps/cef-rs
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "macros", "time", "sync"], optional = true }
 tokio-tungstenite = { version = "0.24", features = ["connect", "handshake"], optional = true }
 futures-util = { version = "0.3", optional = true }
 async-trait = { version = "0.1", optional = true }
+# macOS 无障碍（surface-macos）：系统框架动态链接，仅绑定代码进二进制。
+accessibility = { version = "0.2", optional = true }
+accessibility-sys = { version = "0.2", optional = true }
+core-foundation = { version = "0.10", optional = true }
+core-graphics = { version = "0.25", optional = true, features = ["highsierra"] }
+# Linux AT-SPI（surface-linux）：纯 Rust（zbus），仅在 Linux 运行。
+atspi = { version = "0.30", optional = true, default-features = false, features = ["connection", "proxies", "wrappers", "tokio", "zbus"] }
+# Windows UI Automation（surface-windows）：仅 Windows 运行。
+uiautomation = { version = "0.24", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

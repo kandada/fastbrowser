@@ -305,6 +305,10 @@ pub struct MockEngine {
     next_tab: std::sync::atomic::AtomicU32,
     next_handle: std::sync::atomic::AtomicU64,
     viewport: std::sync::RwLock<Viewport>,
+    /// 持久日志缓冲（Console / Request / Response），**不**被 `drain_events`
+    /// 消费，供 `get_console_logs` / `get_network_log` 读取。
+    logs:
+        std::sync::RwLock<std::collections::HashMap<TabId, std::collections::VecDeque<PageEvent>>>,
     /// 引擎级全局事件通知器（异步事件泵唤醒用）。
     any: Arc<EventNotifier>,
 }
@@ -318,6 +322,7 @@ impl MockEngine {
             next_handle: std::sync::atomic::AtomicU64::new(1),
             viewport: std::sync::RwLock::new(Viewport::new(800, 600)),
             any: Arc::new(EventNotifier::new()),
+            logs: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -366,6 +371,17 @@ impl MockEngine {
             let mut p = p.write().unwrap_or_else(|e| e.into_inner());
             if let Some(sink) = p.event_sink.clone() {
                 sink.on_page_event(tab, &ev);
+            }
+            if matches!(
+                &ev,
+                PageEvent::Console { .. } | PageEvent::Request { .. } | PageEvent::Response { .. }
+            ) {
+                let mut logs = self.logs.write().unwrap_or_else(|e| e.into_inner());
+                let q = logs.entry(tab).or_default();
+                q.push_back(ev.clone());
+                while q.len() > crate::engine::MAX_BUFFERED_EVENTS {
+                    q.pop_front();
+                }
             }
             p.events.push_back(ev);
             while p.events.len() > crate::engine::MAX_BUFFERED_EVENTS {
@@ -443,6 +459,7 @@ impl MockEngine {
                     None
                 }
             }),
+            RefKind::Selector => mock_selector_resolve(page, &r.value),
         }
     }
 
@@ -649,6 +666,29 @@ impl BrowserEngine for MockEngine {
         self.write_map()
             .insert(tab, std::sync::Arc::new(std::sync::RwLock::new(page)));
         self.push(tab, PageEvent::TabOpened { tab });
+        // Seed canned console/network entries into the PERSISTENT log (not the
+        // drainable event buffer) so get_console_logs / get_network_log are
+        // useful and testable on the mock engine.
+        {
+            let mut logs = self.logs.write().unwrap_or_else(|e| e.into_inner());
+            let q = logs.entry(tab).or_default();
+            q.push_back(PageEvent::Console {
+                level: crate::engine::ConsoleLevel::Log,
+                message: "hello from mock".to_string(),
+            });
+            q.push_back(PageEvent::Console {
+                level: crate::engine::ConsoleLevel::Error,
+                message: "mock error".to_string(),
+            });
+            q.push_back(PageEvent::Request {
+                url: "https://example.com/".to_string(),
+                method: "GET".to_string(),
+            });
+            q.push_back(PageEvent::Response {
+                url: "https://example.com/".to_string(),
+                status: 200,
+            });
+        }
         if opts.active {
             *self.active.write().unwrap_or_else(|e| e.into_inner()) = Some(tab);
         }
@@ -853,7 +893,7 @@ impl BrowserEngine for MockEngine {
     fn click_element(&self, tab: TabId, element: &ElementRef) -> Result<()> {
         let (tag, href) = self.with_tab(tab, |page| {
             let idx = self.resolve(page, element).ok_or_else(|| {
-                EngineError::new(ErrorKind::Dom, format!("element {element:?} not found"))
+                EngineError::new(ErrorKind::Dom, format!("element {element} not found"))
             })?;
             let e = &mut page.elements[idx];
             let tag = e.tag.clone();
@@ -876,7 +916,7 @@ impl BrowserEngine for MockEngine {
     fn set_element_value(&self, tab: TabId, element: &ElementRef, value: &str) -> Result<()> {
         self.with_tab(tab, |page| {
             let idx = self.resolve(page, element).ok_or_else(|| {
-                EngineError::new(ErrorKind::Dom, format!("element {element:?} not found"))
+                EngineError::new(ErrorKind::Dom, format!("element {element} not found"))
             })?;
             page.elements[idx].value = Some(value.to_string());
             Ok(())
@@ -889,7 +929,7 @@ impl BrowserEngine for MockEngine {
     fn type_text(&self, tab: TabId, element: &ElementRef, text: &str, clear: bool) -> Result<()> {
         self.with_tab(tab, |page| {
             let idx = self.resolve(page, element).ok_or_else(|| {
-                EngineError::new(ErrorKind::Dom, format!("element {element:?} not found"))
+                EngineError::new(ErrorKind::Dom, format!("element {element} not found"))
             })?;
             if clear {
                 page.elements[idx].value = Some(String::new());
@@ -902,10 +942,27 @@ impl BrowserEngine for MockEngine {
         Ok(())
     }
 
+    /// 向"当前聚焦"输入插入文本（mock 简化为首个可见文本输入）。
+    fn type_text_focused(&self, tab: TabId, text: &str) -> Result<()> {
+        self.with_tab(tab, |page| {
+            if let Some(i) = page
+                .elements
+                .iter()
+                .position(|e| e.input_type.as_deref() == Some("text") && e.visible)
+            {
+                let cur = page.elements[i].value.clone().unwrap_or_default();
+                page.elements[i].value = Some(format!("{cur}{text}"));
+            }
+            Ok(())
+        })?;
+        self.push(tab, PageEvent::DomChanged);
+        Ok(())
+    }
+
     fn select_option(&self, tab: TabId, element: &ElementRef, value: &str) -> Result<()> {
         self.with_tab(tab, |page| {
             let idx = self.resolve(page, element).ok_or_else(|| {
-                EngineError::new(ErrorKind::Dom, format!("element {element:?} not found"))
+                EngineError::new(ErrorKind::Dom, format!("element {element} not found"))
             })?;
             if !page.elements[idx].options.contains(&value.to_string()) {
                 return Err(EngineError::new(
@@ -923,7 +980,7 @@ impl BrowserEngine for MockEngine {
     fn check_element(&self, tab: TabId, element: &ElementRef, checked: bool) -> Result<()> {
         self.with_tab(tab, |page| {
             let idx = self.resolve(page, element).ok_or_else(|| {
-                EngineError::new(ErrorKind::Dom, format!("element {element:?} not found"))
+                EngineError::new(ErrorKind::Dom, format!("element {element} not found"))
             })?;
             page.elements[idx].checked = checked;
             Ok(())
@@ -935,7 +992,7 @@ impl BrowserEngine for MockEngine {
     fn set_file_input(&self, tab: TabId, element: &ElementRef, paths: &[String]) -> Result<()> {
         self.with_tab(tab, |page| {
             let idx = self.resolve(page, element).ok_or_else(|| {
-                EngineError::new(ErrorKind::Dom, format!("element {element:?} not found"))
+                EngineError::new(ErrorKind::Dom, format!("element {element} not found"))
             })?;
             page.elements[idx].files = paths.to_vec();
             Ok(())
@@ -1215,6 +1272,15 @@ impl BrowserEngine for MockEngine {
             .unwrap_or_default()
     }
 
+    fn recent_events(&self, tab: TabId) -> Vec<PageEvent> {
+        self.logs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&tab)
+            .map(|q| q.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     fn event_generation(&self, tab: TabId) -> u64 {
         self.read_tab(tab, |p| p.notifier.generation()).unwrap_or(0)
     }
@@ -1307,8 +1373,9 @@ impl BrowserEngine for MockEngine {
             let nodes: Vec<Value> = page
                 .elements
                 .iter()
-                .filter(|e| e.visible)
-                .map(|e| {
+                .enumerate()
+                .filter(|(_, e)| e.visible)
+                .map(|(i, e)| {
                     let role = e.role.clone().unwrap_or_else(|| match e.tag.as_str() {
                         "a" => "link".to_string(),
                         "button" => "button".to_string(),
@@ -1323,18 +1390,44 @@ impl BrowserEngine for MockEngine {
                         "h1" | "h2" | "h3" => "heading".to_string(),
                         other => other.to_string(),
                     });
+                    // backend_id 用元素下标（稳定于单次快照内），供 surface 层做几何关联。
                     json!({
                         "role": role,
                         "name": e.text.clone().unwrap_or_default(),
                         "value": e.value.clone().unwrap_or_default(),
+                        "description": "",
                         "props": {
                             "checked": if e.input_type.as_deref() == Some("checkbox") || e.input_type.as_deref() == Some("radio") { json!(e.checked) } else { Value::Null },
                             "selected": e.selected.clone().map(|s| json!(s)).unwrap_or(Value::Null),
                         },
+                        "backend_id": i,
+                        "geometry": {
+                            "x": e.rect.x,
+                            "y": e.rect.y,
+                            "width": e.rect.width,
+                            "height": e.rect.height,
+                        },
+                        "children": [],
                     })
                 })
                 .collect();
-            json!({ "tree": nodes, "count": nodes.len() })
+            let root = json!({
+                "role": "webarea",
+                "name": page.title,
+                "value": "",
+                "description": "",
+                "props": {},
+                "backend_id": Value::Null,
+                "geometry": Value::Null,
+                "children": nodes,
+            });
+            json!({
+                "tree": nodes,
+                "root": root,
+                "count": nodes.len(),
+                "geometry_nodes": nodes.len(),
+                "truncated": false,
+            })
         })
     }
 }
@@ -1902,6 +1995,139 @@ fn e_has_attr(e: &MockElement, attr: &str) -> bool {
 // ────────────────────────────────────────────────────────────────
 // 测试
 // ────────────────────────────────────────────────────────────────
+
+/// mock 上的 Playwright 选择器简化匹配（无 DOM 层级，链式取最后一段）。
+fn mock_selector_resolve(page: &Page, sel: &str) -> Option<usize> {
+    let parts: Vec<&str> = sel
+        .split(">>")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let mut nth: Option<usize> = None;
+    let mut last: Option<&str> = None;
+    for p in &parts {
+        if let Some(n) = p
+            .strip_prefix("nth=")
+            .and_then(|s| s.trim().parse::<usize>().ok())
+        {
+            nth = Some(n);
+        } else {
+            last = Some(p);
+        }
+    }
+    let mut seg = last?.to_string();
+    let mut visible_only = false;
+    let mut has_text: Option<String> = None;
+    for marker in [":has-text(", ":text("] {
+        if let Some(i) = seg.find(marker) {
+            let rest = &seg[i + marker.len()..];
+            has_text = Some(unquote_until_paren(rest));
+            seg.truncate(i);
+            break;
+        }
+    }
+    if seg.contains(":visible") {
+        visible_only = true;
+        seg = seg.replace(":visible", "");
+    }
+    let seg = seg.trim().to_string();
+    let (engine, val) = split_mock_engine(&seg);
+    let mut matches: Vec<usize> = page
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| !visible_only || e.visible)
+        .filter(|(_, e)| mock_seg_match(e, engine, val))
+        .map(|(i, _)| i)
+        .collect();
+    if let Some(t) = has_text {
+        matches.retain(|i| {
+            page.elements[*i]
+                .text
+                .as_deref()
+                .map(|s| s.contains(&t))
+                .unwrap_or(false)
+        });
+    }
+    match nth {
+        Some(n) => matches.get(n).copied(),
+        None => matches.first().copied(),
+    }
+}
+
+fn unquote_until_paren(rest: &str) -> String {
+    let r = rest.trim_start();
+    match r.chars().next() {
+        Some(q @ ('"' | '\'')) => {
+            let body = &r[1..];
+            body.find(q)
+                .map(|e| body[..e].to_string())
+                .unwrap_or_default()
+        }
+        _ => r.find(')').map(|e| r[..e].to_string()).unwrap_or_default(),
+    }
+}
+
+fn split_mock_engine(seg: &str) -> (&str, &str) {
+    for e in [
+        "css=",
+        "text=",
+        "xpath=",
+        "id=",
+        "data-testid=",
+        "testid=",
+        "role=",
+    ] {
+        if let Some(rest) = seg.strip_prefix(e) {
+            let canon = if e == "testid=" {
+                "data-testid"
+            } else {
+                e.trim_end_matches('=')
+            };
+            return (canon, rest);
+        }
+    }
+    ("css", seg)
+}
+
+fn mock_seg_match(e: &MockElement, engine: &str, val: &str) -> bool {
+    match engine {
+        "text" => e.text.as_deref() == Some(val),
+        "role" => e
+            .role
+            .as_deref()
+            .map(|r| r.eq_ignore_ascii_case(val))
+            .unwrap_or(false),
+        "id" => e.attrs.get("id").map(String::as_str) == Some(val),
+        "data-testid" => e.attrs.get("data-testid").map(String::as_str) == Some(val),
+        "xpath" => {
+            let tag = val.trim_start_matches('/').trim_start_matches('/');
+            e.tag == tag
+        }
+        _ => {
+            if val == "*" {
+                return true;
+            }
+            if let Some(s) = val.strip_prefix('#') {
+                return e.attrs.get("id").map(String::as_str) == Some(s);
+            }
+            if let Some(s) = val.strip_prefix('.') {
+                return e.attrs.get("class").map(String::as_str) == Some(s);
+            }
+            if let Some(inner) = val.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
+                if let Some((k, v)) = inner.split_once('=') {
+                    let v = v.trim().trim_matches('"').trim_matches('\'');
+                    return e.attrs.get(k.trim()).map(String::as_str) == Some(v);
+                }
+                return e.attrs.contains_key(inner.trim());
+            }
+            e.tag == val
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
