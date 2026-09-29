@@ -12,11 +12,14 @@ name: Python wheels
 # secret (Settings → Secrets and variables → Actions). Set it in THIS repo
 # (secrets are per-repository).
 #
-# HANDOFF: build jobs pass their wheels to the single `publish` job through
-# `actions/cache` (save / restore) instead of actions/upload-artifact +
-# actions/download-artifact — cache storage is NOT part of the account-wide
-# Actions artifact storage quota, so a full artifact quota cannot block a
-# release.
+# HANDOFF: build jobs pass their wheels to the single `publish` job via
+# actions/upload-artifact + actions/download-artifact. Artifact storage is
+# FREE for public repositories (it only counts against the account-wide quota
+# for PRIVATE repos), so this is both the canonical and the cheapest option
+# here. The previous cache-based handoff (cache/save + cache/restore with
+# fail-on-cache-miss) proved flaky: a build job's save could report success
+# while the publish job's restore still missed for one target (observed on
+# windows), failing the whole release.
 #
 # To use PyPI Trusted Publishing (OIDC) instead of a token, add
 # `permissions: { id-token: write }` to the publish job, set
@@ -86,10 +89,11 @@ jobs:
         # which ring's assembly requires (see bindings/python/.cargo/config.toml).
         env:
           CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8"
-      - uses: actions/cache/save@v4
+      - uses: actions/upload-artifact@v4
         with:
-          path: ${{ env.DIST }}
-          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-linux-${{ matrix.target }}
+          name: wheels-${{ matrix.target }}
+          path: ${{ env.DIST }}/*
+          if-no-files-found: error
 
   windows:
     name: Windows x86_64
@@ -102,10 +106,11 @@ jobs:
           working-directory: bindings/python
           target: x86_64-pc-windows-msvc
           args: --release --out dist --features pyo3/extension-module,surface-windows
-      - uses: actions/cache/save@v4
+      - uses: actions/upload-artifact@v4
         with:
-          path: ${{ env.DIST }}
-          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-windows
+          name: wheels-windows
+          path: ${{ env.DIST }}/*
+          if-no-files-found: error
 
   macos:
     name: macOS universal2
@@ -118,10 +123,11 @@ jobs:
           working-directory: bindings/python
           target: universal2-apple-darwin
           args: --release --out dist --features pyo3/extension-module,surface-macos
-      - uses: actions/cache/save@v4
+      - uses: actions/upload-artifact@v4
         with:
-          path: ${{ env.DIST }}
-          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-macos
+          name: wheels-macos
+          path: ${{ env.DIST }}/*
+          if-no-files-found: error
 
   sdist:
     name: sdist
@@ -134,10 +140,11 @@ jobs:
           working-directory: bindings/python
           command: sdist
           args: --out dist
-      - uses: actions/cache/save@v4
+      - uses: actions/upload-artifact@v4
         with:
-          path: ${{ env.DIST }}
-          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-sdist
+          name: wheels-sdist
+          path: ${{ env.DIST }}/*
+          if-no-files-found: error
 
   publish:
     name: Publish to PyPI
@@ -145,37 +152,11 @@ jobs:
     needs: [test, linux, windows, macos, sdist]
     runs-on: ubuntu-latest
     steps:
-      - name: Restore wheels from cache (linux x86_64)
-        uses: actions/cache/restore@v4
+      - uses: actions/download-artifact@v4
         with:
           path: ${{ env.DIST }}
-          fail-on-cache-miss: true
-          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-linux-x86_64-unknown-linux-gnu
-      - name: Restore wheels from cache (linux aarch64)
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.DIST }}
-          fail-on-cache-miss: true
-          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-linux-aarch64-unknown-linux-gnu
-      - name: Restore wheels from cache (windows)
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.DIST }}
-          fail-on-cache-miss: true
-          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-windows
-      - name: Restore wheels from cache (macos)
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.DIST }}
-          fail-on-cache-miss: true
-          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-macos
-      - name: Restore sdist from cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.DIST }}
-          fail-on-cache-miss: true
-          key: wheels-${{ github.run_id }}-${{ github.run_attempt }}-sdist
-      - name: List restored files
+          merge-multiple: true
+      - name: List downloaded files
         run: ls -lR "${{ env.DIST }}"
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
