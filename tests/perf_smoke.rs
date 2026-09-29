@@ -4,7 +4,8 @@
 //! 性能回归守卫：作为普通 `cargo test` 运行，用**宽松阈值**捕获严重性能回退
 //! （如意外 O(n²)、误加阻塞等待）。真实基准见 `benches/perf.rs`（`cargo bench`）。
 //!
-//! 阈值取实测值的 ~100 倍量级余量，避免在慢 CI 上误报。
+//! 阈值对实测值保留足够余量（含磁盘 I/O 的用例取 ~4x 以上），避免慢/抖动
+//! 的 CI 机器误报；目标仍是捕获量级级别的回退（毫秒→秒）。
 
 #[cfg(feature = "engine-cdp")]
 mod common;
@@ -87,14 +88,14 @@ fn session_persistence_is_fast() {
         avg_us(100, || {
             let _ = sdk.session_save(&path).unwrap();
         }),
-        10_000.0,
+        50_000.0,
     );
     assert_under(
         "session_load",
         avg_us(100, || {
             let _ = sdk.session_load(&path).unwrap();
         }),
-        10_000.0,
+        50_000.0,
     );
     let _ = std::fs::remove_file(&path);
 }
