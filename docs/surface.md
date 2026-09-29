@@ -18,6 +18,7 @@ Agent 用同一套 `surface_*` 工具跨表面操作。
 | `surface-macos` | macOS 原生无障碍（AXUIElement）+ 坐标输入（CGEvent）+ 原生截图（screencapture） | `surface` + accessibility/accessibility-sys/core-foundation/core-graphics |
 | `surface-linux` | Linux 原生无障碍（AT-SPI via zbus）；仅 Linux 运行，可跨平台编译校验 | `surface` + atspi |
 | `surface-windows` | Windows 原生无障碍（UI Automation）；仅 Windows 运行 | `surface` + uiautomation |
+| `surface-android` | Android 原生无障碍；由宿主（Kotlin `AccessibilityService`）经 JNI/C ABI `FbSurfaceOps` 注入 ops | `surface` |
 
 ```bash
 # 仅浏览器表面（跨平台）

@@ -11,11 +11,12 @@ AI Agent 需要"看得见、操作得了"网页。fastbrowser 不是简单的 CD
 ## 特性
 
 - **引擎无关** — 一个 `BrowserEngine` trait 抽象 mock / 打包 Chromium / 外部 Chromium（CDP）/ CEF / 系统 WebView，支持 `auto` 自动降级：外部 CDP → 打包 Chromium → WebView → mock。
-- **88 个 LLM 原生工具**（14 个功能域）— 全部 JSON 出入、标准 JSON Schema 参数；工具清单即给 LLM 的说明书。
+- **90+ 个 LLM 原生工具**（14 个功能域）— 全部 JSON 出入、标准 JSON Schema 参数；工具清单即给 LLM 的说明书。
 - **快照即感知入口** — `PageSnapshot`（a/b/c 元素编号 + 滚动/截断元信息 + iframe 子框架 + shadow DOM 元素）。
 - **真实浏览器语义（CDP）** — 坐标级点击（**Playwright 风格 Actionability**：自动等待「出现→可见→不被遮挡→位置稳定」，遮挡点名，支持跨同源 iframe / open shadow DOM）、**真实键盘输入**（`Input.insertText`，React 受控组件 / IME 兼容）。
 - **真实事件流** — 导航 / console / 网络 / JS 对话框 / **下载落盘**（`Browser.setDownloadBehavior`），以及 **OSR 推送帧流**（`Page.startScreencast` + `start_frame_stream`/`stop_frame_stream`）。
-- **真实内容** — 真实 PNG 截图、URL 作用域真实 cookie 与 localStorage、`DOM.setFileInputFiles` 文件上传、`Page.printToPDF`、ARIA 无障碍树、`Fetch` 请求拦截（fulfill/continue/abort）。
+- **真实内容** — 真实 PNG 截图、URL 作用域真实 cookie 与 localStorage、`DOM.setFileInputFiles` 文件上传、`Page.printToPDF`、`Fetch` 请求拦截（fulfill/continue/abort）。
+- **无障碍与原生表面** — 既有 ARIA 无障碍树（`get_accessibility_tree`），又有统一的「感知 + 动作」表面（`ax_list` / `ax_snapshot` / `ax_act` / `ax_click` / `ax_type` / `ax_scroll` / `ax_events`），**网页元素与系统原生控件通用**：macOS `AXUIElement`+`CGEvent`、Linux AT-SPI、Windows UIA、Android `AccessibilityService`（见下）。
 - **Profile 隔离** — 每个 Profile 独立浏览器上下文（CDP `BrowserContext`），无头 Chrome 亦可用。
 - **快照 DOM 缓存** — MutationObserver 脏标记，大页面高频快照免全量重扫。
 - **双壳架构** — 同步壳（C ABI / CLI / Kotlin / Swift）与异步壳（`AsyncFastbrowser`，feature `async-core`：async 工具调用、每标签事件流推送、`wait_any`/`wait_for_navigation` 编排、`run_concurrently`/`open_many` 多标签并发）共享同一浏览器实例。
@@ -175,6 +176,50 @@ let audit = sdk.audit();                     // serde_json::Value（JSON 数组�
 sdk.clear_audit();
 ```
 
+## 无障碍与原生表面（feature `surface*`）
+
+无障碍既是「感知」也是「动作」，在网页与宿主系统之间**统一**。
+
+- **工具**：`ax_list`、`ax_snapshot`、`ax_act`、`ax_click`、`ax_type`、
+  `ax_scroll`、`ax_events`。`SurfaceAction` 覆盖 click / double_click /
+  right_click / focus / set_value / type / check / uncheck / select / scroll /
+  press_key / increment / decrement / show_menu / raise —— 网页元素与原生控件
+  同一套动作模型。
+- **感知**：优先用 `ax_snapshot`（role / name / state / actions / `ref`，另带
+  缩进的 `text` 友好视图）。`get_accessibility_tree` 是引擎/DOM 兜底，当唯一
+  AX 来源是「逐字符节点」时会报 `quality:"low"` 并给出提示。
+- **后端** —— 由 cargo feature 启用、运行时用 `Config.surface.provider` 选择
+  （`auto` = 浏览器 + 平台原生）：
+
+  | feature | provider | 平台 |
+  |---|---|---|
+  | *（无）* | `browser` | 网页（CDP AX / 注入 JS）—— 所有引擎 |
+  | `surface-macos` | `macos` | macOS `AXUIElement` + `CGEvent` |
+  | `surface-linux` | `linux` | AT-SPI（D-Bus） |
+  | `surface-windows` | `windows` | UI Automation |
+  | `surface-android` | `android` | 宿主 `AccessibilityService`，经 C ABI `FbSurfaceOps` 注入 |
+
+- **ref** 带命名空间（`web:<tab>:…`、`desktop:<pid>:…`）；动作工具接受前导 `@`
+  （Playwright-MCP 风格，如 `@web:1:ax:8`）。
+
+### 选择器方言
+
+`find_elements`、`click`、`type` 等共用同一套方言引擎（网页 + AX 工具）：
+
+- `role=<role>` + ARIA 过滤项 —— `role=button[name="Submit"]`、`[exact]`、
+  `[checked]`、`[disabled]`、`[expanded]`、`[selected]`、`[level=N]`。
+- `name=`、`label=`、`placeholder=`、`alt=`、`title=`、`value=`、`href=`、
+  `text=`（子串，或 `text="精确"`）、`testid=` / `data-testid=`。
+- `css=`、`xpath=` / `//…`、`id=`、链式 `A >> B`、`:visible`、`:has-text()`、
+  `:text()`、`nth=N`。
+- 兼容 Playwright-MCP / Testing-Library 的工具别名（`getByRole`、`getByText`、
+  `getByLabel`、`getByPlaceholder`、`getByAltText`、`getByTitle`、`getByTestId`、
+  `page.locator`、`browser_*` …）。
+
+> `ax_*` 仅在以 `surface*` feature 构建时存在。macOS/Linux/Windows 原生后端需要
+> 系统无障碍授权/会话；Android 需用户在系统设置中开启本 App 的
+> AccessibilityService。详见 `docs/surface.md`。
+
 ## 引擎
 
 `Config.engine`：`mock`（默认，内存参考引擎）/ `bundled`（打包 Chromium）/ `chromium`（配 `cdp_url`，连外部 Chrome/Edge）/ `cef`（桌面 CEF 嵌入，windowless）/ `webview` / `webkit`（系统 WebView 桥）/ `auto`（自动降级链）。
@@ -274,7 +319,7 @@ cargo test --features engine-cdp --test bundled_chromium_integration      # 打�
 src/engine/       BrowserEngine trait + 类型（无平台依赖）
 src/engines/      mock / bundled / chromium(cdp) / cef / webview
 src/cdp/          CDP 客户端 + 端点发现
-src/tools/        88 个 Agent 工具（14 功能域，JSON Schema 参数）
+src/tools/        90+ 个 Agent 工具（14 功能域，JSON Schema 参数）
 src/session/      Profile / Cookie / Storage / 持久化 + BrowserContext 隔离
 src/bridge/       Runtime 装配 + 动作审计日志
 src/sdk/          对外 SDK + C ABI（ffi.rs）
@@ -290,9 +335,10 @@ scripts/          fetch-chromium / fetch-cef / package-desktop / build-android /
 ## 文档
 
 - 架构：`docs/architecture.md`
-- 接口文档：`docs/api-reference.zh.md`（Config / SDK / 类型 / 引擎契约 / 88 个工具全清单）
+- 接口文档：`docs/api-reference.zh.md`（Config / SDK / 类型 / 引擎契约 / 90+ 个工具全清单）
 - 引擎契约：`docs/engine-trait.md`
 - 快照规范：`docs/snapshot.md`
+- 无障碍 / 原生表面：`docs/surface.md`
 - 工具协议：`docs/tool-protocol.md`
 - C ABI：`docs/c-api.md`、`fastbrowser_c/include/fastbrowser.h`
 

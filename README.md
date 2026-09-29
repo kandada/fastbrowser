@@ -11,11 +11,12 @@ AI agents need to *see* and *operate* web pages. Instead of a thin CDP wrapper, 
 ## Features
 
 - **Engine-agnostic** — a single `BrowserEngine` trait abstracts mock / bundled Chromium / external Chromium (CDP) / CEF / system WebView, with `auto` fallback: external CDP → bundled Chromium → WebView → mock.
-- **88 LLM-native tools** (14 domains) — every tool is JSON-in/JSON-out with standard JSON-Schema params; the tool manifest *is* the LLM's instruction manual.
+- **90+ LLM-native tools** (14 domains) — every tool is JSON-in/JSON-out with standard JSON-Schema params; the tool manifest *is* the LLM's instruction manual.
 - **Snapshot as the perception entry** — `PageSnapshot` with a/b/c element ids, scroll/truncation meta, iframe frames, and shadow-DOM elements.
 - **Real-browser semantics (CDP)** — coordinate-level click with **Playwright-style actionability** (auto-waits for visible, not-covered, stable; reports the blocker; works across same-origin iframes and open shadow roots), **real keyboard input** (`Input.insertText`, React-controlled-input & IME compatible).
 - **Real event stream** — navigation / console / network / JS dialogs / **downloads-to-disk** (`Browser.setDownloadBehavior`), plus **push OSR frame streaming** (`Page.startScreencast` + `start_frame_stream`/`stop_frame_stream`).
-- **Real content** — real PNG screenshots, URL-scoped real cookies & localStorage, file upload via `DOM.setFileInputFiles`, `Page.printToPDF`, ARIA accessibility tree, `Fetch` request interception with fulfill/continue/abort.
+- **Real content** — real PNG screenshots, URL-scoped real cookies & localStorage, file upload via `DOM.setFileInputFiles`, `Page.printToPDF`, `Fetch` request interception with fulfill/continue/abort.
+- **Accessibility & native surface** — an ARIA accessibility tree (`get_accessibility_tree`) **and** a unified action/perception surface (`ax_list` / `ax_snapshot` / `ax_act` / `ax_click` / `ax_type` / `ax_scroll` / `ax_events`) that works on the web page **and** on OS controls — macOS `AXUIElement`+`CGEvent`, Linux AT-SPI, Windows UI Automation, Android `AccessibilityService` (see below).
 - **Profile isolation** — per-profile isolated browser contexts (CDP `BrowserContext`), works in headless Chrome too.
 - **Snapshot DOM caching** — MutationObserver dirty-flag avoids full re-scans on big pages.
 - **Dual-shell architecture** — the sync shell (C ABI / CLI / Kotlin / Swift) and the async shell (`AsyncFastbrowser`, feature `async-core`: async tool calls, per-tab event-stream push, `wait_any`/`wait_for_navigation` orchestration, `run_concurrently`/`open_many` multi-tab concurrency) share the same browser instance.
@@ -175,6 +176,53 @@ let audit = sdk.audit();                     // serde_json::Value (a JSON array)
 sdk.clear_audit();
 ```
 
+## Accessibility & native surface (features `surface*`)
+
+Accessibility is a first-class perception **and** action surface, unified across
+the web page and the host OS.
+
+- **Tools**: `ax_list`, `ax_snapshot`, `ax_act`, `ax_click`, `ax_type`,
+  `ax_scroll`, `ax_events`. `SurfaceAction` covers click / double_click /
+  right_click / focus / set_value / type / check / uncheck / select / scroll /
+  press_key / increment / decrement / show_menu / raise — the same action model
+  on a web element and a native control.
+- **Perception**: prefer `ax_snapshot` (role / name / state / actions / `ref`,
+  plus a compact indented `text` view). `get_accessibility_tree` is the
+  engine/DOM fallback and reports `quality:"low"` (with a hint) when the only
+  AX source is glyph-per-node.
+- **Backends** — enabled by a cargo feature and selected at runtime via
+  `Config.surface.provider` (`auto` = browser + native):
+
+  | feature | provider | platform |
+  |---|---|---|
+  | *(none)* | `browser` | web page via CDP AX / injected JS — all engines |
+  | `surface-macos` | `macos` | macOS `AXUIElement` + `CGEvent` |
+  | `surface-linux` | `linux` | AT-SPI (D-Bus) |
+  | `surface-windows` | `windows` | UI Automation |
+  | `surface-android` | `android` | host `AccessibilityService` via the C ABI `FbSurfaceOps` table |
+
+- **Refs** are namespaced (`web:<tab>:…`, `desktop:<pid>:…`); a leading `@`
+  (Playwright-MCP style, e.g. `@web:1:ax:8`) is accepted on action tools.
+
+### Selector dialects
+
+`find_elements`, `click`, `type`, … share one dialect engine (web + AX tools):
+
+- `role=<role>` with ARIA option filters — `role=button[name="Submit"]`,
+  `[exact]`, `[checked]`, `[disabled]`, `[expanded]`, `[selected]`, `[level=N]`.
+- `name=`, `label=`, `placeholder=`, `alt=`, `title=`, `value=`, `href=`,
+  `text=` (substring, or `text="exact"`), `testid=` / `data-testid=`.
+- `css=`, `xpath=` / `//…`, `id=`, chaining `A >> B`, `:visible`,
+  `:has-text()`, `:text()`, `nth=N`.
+- Playwright-MCP / Testing-Library tool aliases resolve too (`getByRole`,
+  `getByText`, `getByLabel`, `getByPlaceholder`, `getByAltText`, `getByTitle`,
+  `getByTestId`, `page.locator`, `browser_*`, …).
+
+> The `ax_*` tools exist only when built with a `surface*` feature. The
+> macOS/Linux/Windows backends need the OS accessibility permission/session;
+> Android requires the user to enable the app's AccessibilityService. See
+> `docs/surface.md`.
+
 ## Engines
 
 `Config.engine`: `mock` (default, in-memory reference) / `bundled` (vendored Chromium) / `chromium` (external Chrome/Edge via `cdp_url`) / `cef` (desktop CEF embedding, windowless) / `webview` / `webkit` (system WebView bridge) / `auto` (degradation chain).
@@ -274,7 +322,7 @@ cargo test --features engine-cdp --test bundled_chromium_integration      # vend
 src/engine/       BrowserEngine trait + types (no platform deps)
 src/engines/      mock / bundled / chromium(cdp) / cef / webview
 src/cdp/          CDP client + endpoint discovery
-src/tools/        88 Agent tools (14 domains, JSON-Schema params)
+src/tools/        90+ Agent tools (14 domains, JSON-Schema params)
 src/session/      Profile / Cookie / Storage / persistence + BrowserContext isolation
 src/bridge/       Runtime assembly + action audit log
 src/sdk/          Public SDK + C ABI (ffi.rs)
@@ -290,9 +338,10 @@ Build artifacts (`target/`, `dist/`, `vendor/`) are git-ignored and live inside 
 ## Docs
 
 - Architecture: `docs/architecture.md`
-- API reference: `docs/api-reference.md` (Config / SDK / types / engine contract / all 88 tools)
+- API reference: `docs/api-reference.md` (Config / SDK / types / engine contract / all 90+ tools)
 - Engine contract: `docs/engine-trait.md`
 - Snapshot spec: `docs/snapshot.md`
+- Accessibility / native surface: `docs/surface.md`
 - Tool protocol: `docs/tool-protocol.md`
 - C ABI: `docs/c-api.md`, `fastbrowser_c/include/fastbrowser.h`
 

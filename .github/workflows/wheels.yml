@@ -36,6 +36,11 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref (e.g. a re-pushed tag).
+concurrency:
+  group: wheels-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # Same path in every build job and in the publish job (repo root layout).
   DIST: bindings/python/dist

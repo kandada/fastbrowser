@@ -3,7 +3,23 @@ name: CI
 on:
   push:
     branches: [main, master]
+    # Doc-only changes don't need a full 3-OS Rust build.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+
+# Cancel superseded runs on the same ref (saves CI time/quota).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
