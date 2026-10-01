@@ -12,7 +12,8 @@ use crate::engine::{RenderingMode, Viewport};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// 引擎类型："mock" | "cef" | "webview"。默认按编译 feature 决定。
+    /// 引擎类型："mock" | "bundled" | "chromium" | "system" | "cef" | "webview"
+    /// | "auto"。默认 "mock"。
     pub engine: String,
     /// 渲染模式：托管（窗口内嵌 / 宿主嵌入视图）或 无头（离屏）。
     pub rendering_mode: RenderingMode,
@@ -65,6 +66,26 @@ pub struct Config {
     /// 默认关闭——某些无头浏览器（如 Chrome for Testing）不支持
     /// `Target.createBrowserContext`，开启后在不受支持的引擎上会自动降级。
     pub isolated_profiles: bool,
+    /// Desktop/pip: explicit system/default browser executable path. Highest
+    /// priority for the `system` engine and the `auto` chain; equivalent to the
+    /// `CHROME_PATH` environment variable. `None` = auto-discover.
+    pub browser_path: Option<String>,
+    /// Launch a real browser headless (a window is shown only when
+    /// `rendering_mode:"hosted"`). Default `true`.
+    pub prefer_headless: bool,
+    /// Whether `auto` / `system` may use the platform default browser. Default
+    /// `true`.
+    pub use_default_browser: bool,
+    /// Reuse the default browser's real profile. Default `false` — an isolated
+    /// temporary profile is used so the user's session is never touched.
+    pub use_user_profile: bool,
+    /// Remote debugging port for a launched real browser (`0` = pick a free
+    /// port automatically).
+    pub remote_debug_port: u16,
+    /// When the `auto` chain finds no real browser, fall back to `mock`. Default
+    /// `true`, but the fallback is **always reported** (`degraded` + `hint`),
+    /// never silent. Set `false` to fail instead.
+    pub allow_fallback_mock: bool,
     /// 电脑操作表面层配置（feature `surface` 生效）。
     #[serde(default)]
     pub surface: SurfaceConfig,
@@ -132,6 +153,12 @@ impl Default for Config {
             network_ask_permission: false,
             auto_accept_dialogs: true,
             isolated_profiles: false,
+            browser_path: None,
+            prefer_headless: true,
+            use_default_browser: true,
+            use_user_profile: false,
+            remote_debug_port: 0,
+            allow_fallback_mock: true,
             surface: SurfaceConfig::default(),
         }
     }

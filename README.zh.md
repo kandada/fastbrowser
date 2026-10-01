@@ -29,7 +29,7 @@ AI Agent 需要"看得见、操作得了"网页。fastbrowser 不是简单的 CD
 
 ```toml
 [dependencies]
-fastbrowser = "0.1.6"
+fastbrowser = "0.1.7"
 ```
 
 ## 快速开始
@@ -222,7 +222,11 @@ sdk.clear_audit();
 
 ## 引擎
 
-`Config.engine`：`mock`（默认，内存参考引擎）/ `bundled`（打包 Chromium）/ `chromium`（配 `cdp_url`，连外部 Chrome/Edge）/ `cef`（桌面 CEF 嵌入，windowless）/ `webview` / `webkit`（系统 WebView 桥）/ `auto`（自动降级链）。
+`Config.engine`：`mock`（默认，内存参考引擎）/ `bundled`（打包 Chromium）/ `chromium`（配 `cdp_url`，连外部 Chrome/Edge）/ `system`（系统/默认 Chrome/Edge/Chromium，自动拉起）/ `cef`（桌面 CEF 嵌入，windowless）/ `webview` / `webkit`（系统 WebView 桥）/ `auto`（自动降级链）。
+
+### `auto` 降级与兜底提示
+
+`auto` 依次尝试：外部 `cdp_url` → `bundled` → **`system`**（平台默认浏览器或已知 Chrome/Edge/Chromium 安装；仅 CDP-capable）→ 宿主 `webview` → `mock`。所选引擎**始终上报**：`status()` / `get_info()` 带 `engine_requested`、`engine_used`、`degraded`，降级时还有 `fallback_reason` 与 `hint`（CLI 也会打印到 stderr）。回退到 `mock` **绝不静默**——置 `Config.allow_fallback_mock=false` 则改为报错。真实浏览器默认**无头 + 隔离临时 profile**（`rendering_mode:"hosted"` 才开窗；`use_user_profile:true` 复用真实 profile）。可用 `Config.browser_path` / `CHROME_PATH` 指向任意 Chrome/Chromium（如 `playwright install chromium`）。
 
 ### 桌面端：打包 Chromium
 
@@ -246,7 +250,7 @@ sdk.clear_audit();
 
 ```rust
 pub struct Config {
-    pub engine: String,                    // mock / bundled / chromium / cef / webview / auto
+    pub engine: String,                    // mock / bundled / chromium / system / cef / webview / auto
     pub rendering_mode: RenderingMode,     // Headless / Hosted
     pub profile_name: String,              // 多账号隔离
     pub incognito: bool,                   // 关闭时不落盘 cookie/storage
@@ -317,7 +321,7 @@ cargo test --features engine-cdp --test bundled_chromium_integration      # 打�
 
 ```
 src/engine/       BrowserEngine trait + 类型（无平台依赖）
-src/engines/      mock / bundled / chromium(cdp) / cef / webview
+src/engines/      mock / bundled / chromium(cdp) / system / cef / webview
 src/cdp/          CDP 客户端 + 端点发现
 src/tools/        90+ 个 Agent 工具（14 功能域，JSON Schema 参数）
 src/session/      Profile / Cookie / Storage / 持久化 + BrowserContext 隔离

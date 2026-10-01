@@ -25,6 +25,18 @@ pub struct SdkInfo {
     /// Lets callers (and the `fastbrowser info` CLI) detect missing features
     /// without launching a browser.
     pub engines: Vec<String>,
+    /// Canonical engine the caller requested.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub engine_requested: String,
+    /// Engine tier actually used (may differ from `engine_requested` on `auto`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub engine_used: String,
+    /// `true` when `auto` degraded (e.g. fell back to `mock`).
+    #[serde(default)]
+    pub degraded: bool,
+    /// Actionable guidance when degraded / a real browser was missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 impl SdkInfo {

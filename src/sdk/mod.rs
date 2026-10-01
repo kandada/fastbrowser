@@ -14,7 +14,7 @@ use crate::engine::host::{EncodedFrameSink, PageEventSink, ViewFrameSink};
 use crate::engine::{
     EngineError, FrameStreamOptions, Image, PageSnapshot, Result, TabId, ViewHandle, Viewport,
 };
-use crate::engines::create_engine;
+use crate::engines::resolve_engine;
 use crate::sdk::types::SdkInfo;
 use crate::session::SessionState;
 
@@ -70,8 +70,19 @@ impl Fastbrowser {
             config.engine,
             config.rendering_mode
         );
-        let engine = create_engine(&config, ops)?;
-        let rt = Runtime::new(engine, config.clone());
+        let (engine, report) = resolve_engine(&config, ops)?;
+        crate::fb_log!(
+            "engine resolved: requested='{}' used='{}' degraded={}{}",
+            report.requested,
+            report.used,
+            report.degraded,
+            report
+                .hint
+                .as_deref()
+                .map(|h| format!(" hint={h}"))
+                .unwrap_or_default()
+        );
+        let rt = Runtime::new(engine, config.clone()).with_engine_report(report);
         rt.session().ensure_default();
         *self.runtime.write().unwrap_or_else(|e| e.into_inner()) = Some(rt);
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = config;
@@ -367,11 +378,15 @@ impl Fastbrowser {
             active_tab: st["active_tab"].as_u64().map(|v| v as u32),
             profiles: st["profiles"].as_array().map(|a| a.len()).unwrap_or(0),
             tools: self.tool_count(),
-            engines: ["mock", "chromium", "bundled", "cef", "webview"]
+            engines: ["mock", "chromium", "bundled", "system", "cef", "webview"]
                 .iter()
                 .filter(|e| crate::engines::is_engine_built(e))
                 .map(|e| e.to_string())
                 .collect(),
+            engine_requested: st["engine_requested"].as_str().unwrap_or("").to_string(),
+            engine_used: st["engine_used"].as_str().unwrap_or("").to_string(),
+            degraded: st["degraded"].as_bool().unwrap_or(false),
+            hint: st["hint"].as_str().map(|s| s.to_string()),
         }
     }
 

@@ -19,9 +19,17 @@ use crate::engines::cdp::ChromiumCdpEngine;
 
 static PROFILE_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// 定位 Chromium 可执行文件（`CHROME_PATH` 覆盖；其次源码树 vendor/chromium；
-/// 再其次相对当前可执行文件向上/常见目录，支持打包进 .app 后运行）。
-pub fn find_bundled_binary() -> Option<PathBuf> {
+/// 定位 Chromium 可执行文件（`explicit` / `CHROME_PATH` 覆盖；其次源码树
+/// vendor/chromium；再其次相对当前可执行文件向上/常见目录，支持打包进 .app）。
+pub fn find_bundled_binary_in(explicit: Option<&str>) -> Option<PathBuf> {
+    if let Some(p) = explicit {
+        if !p.trim().is_empty() {
+            let pb = PathBuf::from(p);
+            if pb.exists() {
+                return Some(pb);
+            }
+        }
+    }
     if let Ok(p) = std::env::var("CHROME_PATH") {
         let pb = PathBuf::from(p);
         if pb.exists() {
@@ -80,6 +88,11 @@ pub fn find_bundled_binary() -> Option<PathBuf> {
     None
 }
 
+/// Back-compat no-arg form of [`find_bundled_binary_in`].
+pub fn find_bundled_binary() -> Option<PathBuf> {
+    find_bundled_binary_in(None)
+}
+
 fn probe(dir: &PathBuf, names: &[&str]) -> Option<PathBuf> {
     for n in names {
         let cand = dir.join(n);
@@ -108,26 +121,38 @@ fn probe(dir: &PathBuf, names: &[&str]) -> Option<PathBuf> {
 pub struct BundledChromium {
     child: Child,
     port: u16,
-    profile: PathBuf,
+    /// Temporary profile to remove on drop; `None` when the user's real profile
+    /// is reused (`use_user_profile`).
+    profile: Option<PathBuf>,
 }
 
 impl BundledChromium {
-    /// 启动打包的 Chromium。`headed = true` 时打开**真实窗口**（用户像用 Chrome
-    /// 一样直接操作，Agent 经 CDP 驱动同一实例）；`headed = false` 时无头离屏。
+    /// 启动 Chromium。`headed = true` 时打开**真实窗口**（用户像用 Chrome 一样
+    /// 直接操作，Agent 经 CDP 驱动同一实例）；`headed = false` 时无头离屏。
+    /// `use_user_profile=true` 时不加 `--user-data-dir`（复用默认 profile——
+    /// 仅当用户没有正在运行的浏览器实例时可行）。
     pub fn launch(
         binary: &PathBuf,
         port: u16,
         viewport: Option<(u32, u32)>,
         headed: bool,
+        use_user_profile: bool,
     ) -> Result<Self> {
-        let seq = PROFILE_SEQ.fetch_add(1, Ordering::SeqCst);
-        let profile =
-            std::env::temp_dir().join(format!("fastbrowser-cft-{}-{seq}", std::process::id()));
-        let _ = std::fs::create_dir_all(&profile);
+        let profile = if use_user_profile {
+            None
+        } else {
+            let seq = PROFILE_SEQ.fetch_add(1, Ordering::SeqCst);
+            let dir =
+                std::env::temp_dir().join(format!("fastbrowser-cft-{}-{seq}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            Some(dir)
+        };
         let mut cmd = Command::new(binary);
-        cmd.arg(format!("--remote-debugging-port={port}"))
-            .arg(format!("--user-data-dir={}", profile.display()))
-            .arg("--no-first-run")
+        cmd.arg(format!("--remote-debugging-port={port}"));
+        if let Some(p) = &profile {
+            cmd.arg(format!("--user-data-dir={}", p.display()));
+        }
+        cmd.arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--disable-extensions")
             .arg("about:blank");
@@ -143,9 +168,7 @@ impl BundledChromium {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| {
-                EngineError::new(ErrorKind::Io, format!("launch bundled chromium: {e}"))
-            })?;
+            .map_err(|e| EngineError::new(ErrorKind::Io, format!("launch chromium: {e}")))?;
         Ok(BundledChromium {
             child,
             port,
@@ -158,12 +181,20 @@ impl BundledChromium {
         crate::cdp::discovery::discover_browser_ws(self.port).unwrap_or_default()
     }
 
-    /// 启动并连接引擎（BundledChromium 作为 keep-alive 随引擎存活）。
+    /// 启动并连接引擎（keep-alive 子进程随引擎存活）。
+    ///
+    /// Honors `Config.prefer_headless` / `rendering_mode` (headed) and
+    /// `Config.remote_debug_port` (0 = free port) / `use_user_profile`.
     pub fn connect_engine(binary: PathBuf, config: &Config) -> Result<ChromiumCdpEngine> {
-        let port = crate::cdp::discovery::free_port()?;
+        let port = if config.remote_debug_port > 0 {
+            config.remote_debug_port
+        } else {
+            crate::cdp::discovery::free_port()?
+        };
         let viewport = config.viewport.map(|v| (v.width, v.height));
-        let headed = config.rendering_mode == crate::engine::RenderingMode::Hosted;
-        let host = Self::launch(&binary, port, viewport, headed)?;
+        let headed = config.rendering_mode == crate::engine::RenderingMode::Hosted
+            || !config.prefer_headless;
+        let host = Self::launch(&binary, port, viewport, headed, config.use_user_profile)?;
         // 等待调试端点就绪
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         let mut url = String::new();
@@ -177,7 +208,9 @@ impl BundledChromium {
         if url.is_empty() {
             return Err(EngineError::new(
                 ErrorKind::Navigation,
-                "bundled chromium debug endpoint not ready",
+                format!(
+                    "chromium debug endpoint not ready on port {port} (browser may have failed to start)"
+                ),
             ));
         }
         let timeout = config.effective_command_timeout_ms();
@@ -189,7 +222,9 @@ impl Drop for BundledChromium {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.profile);
+        if let Some(p) = &self.profile {
+            let _ = std::fs::remove_dir_all(p);
+        }
     }
 }
 

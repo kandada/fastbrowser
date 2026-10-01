@@ -36,6 +36,8 @@ pub struct Runtime {
     creating: AtomicBool,
     /// 动作审计日志（工具调用 + SDK 操作）。
     audit: Mutex<crate::audit::AuditLog>,
+    /// Engine selection report (requested vs used, `auto` fallback reason/hint).
+    engine_report: RwLock<Option<crate::engines::EngineReport>>,
     /// 电脑操作表面层（feature `surface`）。
     #[cfg(feature = "surface")]
     surface: Option<crate::engine::SurfaceRuntime>,
@@ -55,9 +57,18 @@ impl Runtime {
             tab_ready: Condvar::new(),
             creating: AtomicBool::new(false),
             audit: Mutex::new(crate::audit::AuditLog::new()),
+            engine_report: RwLock::new(None),
             #[cfg(feature = "surface")]
             surface,
         }
+    }
+
+    /// Attach the engine-selection report (set once at init by the SDK).
+    pub fn with_engine_report(self, report: crate::engines::EngineReport) -> Self {
+        if let Ok(mut g) = self.engine_report.write() {
+            *g = Some(report);
+        }
+        self
     }
 
     pub fn engine(&self) -> &dyn BrowserEngine {
@@ -363,6 +374,25 @@ impl Runtime {
             "rendering_mode": self.config.read().unwrap_or_else(|e| e.into_inner()).rendering_mode,
             "version": crate::VERSION,
         });
+        if let Ok(r) = self.engine_report.read() {
+            if let Some(r) = r.as_ref() {
+                v["engine_requested"] = json!(r.requested);
+                v["engine_used"] = json!(r.used);
+                v["degraded"] = json!(r.degraded);
+                if !r.tried.is_empty() {
+                    v["tried"] = json!(r.tried);
+                }
+                if !r.missing.is_empty() {
+                    v["missing"] = json!(r.missing);
+                }
+                if let Some(reason) = &r.reason {
+                    v["fallback_reason"] = json!(reason);
+                }
+                if let Some(hint) = &r.hint {
+                    v["hint"] = json!(hint);
+                }
+            }
+        }
         #[cfg(feature = "surface")]
         {
             let surface = match self.surface.as_ref() {
@@ -458,6 +488,26 @@ mod tests {
         let r = runtime();
         let res = r.call_tool("nope", json!({}));
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn status_reports_engine_selection() {
+        let report = crate::engines::EngineReport {
+            requested: "auto".into(),
+            used: "mock".into(),
+            degraded: true,
+            reason: Some("no real browser".into()),
+            hint: Some("install Chrome or set CHROME_PATH".into()),
+            ..Default::default()
+        };
+        let r =
+            Runtime::new(Box::new(MockEngine::new()), Config::default()).with_engine_report(report);
+        let st = r.status();
+        assert_eq!(st["engine_requested"], "auto");
+        assert_eq!(st["engine_used"], "mock");
+        assert_eq!(st["degraded"], true);
+        assert_eq!(st["fallback_reason"], "no real browser");
+        assert!(st["hint"].as_str().unwrap().contains("CHROME_PATH"));
     }
 
     #[test]

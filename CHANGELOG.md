@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-10
+
+- Desktop/pip: `auto` no longer falls back to `mock` silently. The chain is now
+  external `cdp_url` → `bundled` → **`system`** (platform default browser, or a
+  well-known Chrome/Edge/Chromium install; CDP-capable only) → host `webview` →
+  `mock`, and the choice is always reported (`status()` / `get_info()` carry
+  `engine_requested`, `engine_used`, `degraded`, `fallback_reason`, `hint`). Set
+  `allow_fallback_mock=false` to fail instead of degrading to `mock`.
+- New `engine:"system"`: discover and launch a system/default Chrome/Edge/Chromium
+  over CDP.
+- New `Config` fields: `browser_path`, `prefer_headless`, `use_default_browser`,
+  `use_user_profile`, `remote_debug_port`, `allow_fallback_mock`. Real browsers
+  launch headless with an isolated temp profile by default.
+- Clearer missing-browser guidance: `chromium` needs `cdp_url`; `bundled`/`system`
+  hints; `auto`→`mock` explanation. The CLI prints a degradation notice to stderr.
+
 ## [0.1.6] - 2026-09
 
 - `get_accessibility_tree` is now pruned by default: noise nodes filtered,

@@ -54,6 +54,41 @@ Accessibility (with feature `surface`):
   ax_act <ref> <action> [json] | ax_scroll <ref> <dy> | ax_events [target]
 "#;
 
+/// Print a one-line notice to stderr when the engine was degraded (e.g. `auto`
+/// fell back to `mock`), so a real browser is never silently assumed.
+fn warn_engine_degraded(sdk: &Fastbrowser) {
+    let st = sdk.status();
+    let degraded = st
+        .get("degraded")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !degraded {
+        return;
+    }
+    let requested = st
+        .get("engine_requested")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let used = st.get("engine_used").and_then(|v| v.as_str()).unwrap_or("");
+    let reason = st
+        .get("fallback_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    eprintln!(
+        "[fastbrowser] engine '{requested}' degraded to '{used}'{}",
+        if reason.is_empty() {
+            String::new()
+        } else {
+            format!(": {reason}")
+        }
+    );
+    if let Some(hint) = st.get("hint").and_then(|v| v.as_str()) {
+        if !hint.is_empty() {
+            eprintln!("[fastbrowser] hint: {hint}");
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
@@ -101,6 +136,7 @@ fn main() {
         println!("{}", e.to_json());
         std::process::exit(1);
     }
+    warn_engine_degraded(&sdk);
 
     if rest.is_empty() {
         println!(

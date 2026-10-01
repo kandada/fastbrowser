@@ -4,7 +4,8 @@ Python bindings for [fastbrowser](../fastbrowser) — a cross-platform browser-a
 kernel for AI agents, written in Rust. This package exposes the kernel through PyO3.
 
 - **Engine-agnostic**: mock (no deps) / `chromium` (CDP) / `bundled` (Chrome for Testing) /
-  `webview` / `cef`, unified behind one `BrowserEngine` trait.
+  `system` (system/default Chrome/Edge/Chromium) / `webview` / `cef`, unified behind one
+  `BrowserEngine` trait. `auto` degrades through them (never silently to `mock`).
 - **AI-native**: 95 LLM-friendly tools (`navigate`, `click`, `type`, `extract_text`,
   `wait_for_element`, `fill_form`, `screenshot`, …), all JSON in/out.
 - **Multi-tab concurrency**: per-tab locks — different tabs run in parallel, same tab serialized
@@ -231,6 +232,20 @@ Or use the bundled Chrome for Testing (downloads separately, not shipped in the 
 ```python
 b.init({"engine": "bundled"})   # auto-launches vendor/chromium (or CHROME_PATH)
 ```
+
+Or let the kernel **find and launch a system/default browser for you** (`system`), or try
+everything automatically (`auto`) — which never silently falls back to `mock`:
+
+```python
+b.init({"engine": "auto"})       # cdp_url → bundled → system/default browser → webview → mock
+used = b.status()["engine_used"] # "chromium" | "bundled" | "system" | "webview" | "mock"
+if b.status().get("degraded"):
+    print("hint:", b.status().get("hint"))   # why it degraded + how to get a real browser
+```
+
+`auto` only uses **CDP-capable** browsers (Chrome/Edge/Chromium/Brave — not Safari/Firefox).
+A real browser launches **headless with an isolated temp profile** by default. Point
+`browser_path` (or `CHROME_PATH`) at a specific binary (e.g. `playwright install chromium`).
 
 With a real engine, `click`/`type` use real coordinate-level input with Playwright-style
 actionability, `execute_js` runs in the real page, `screenshot` captures real pixels, and

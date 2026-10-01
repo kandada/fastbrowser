@@ -1,6 +1,6 @@
 # fastbrowser 接口文档（API Reference）
 
-> 版本：0.1.6 · 本文档描述内核对外暴露的全部接口：配置、同步/异步 SDK、核心数据类型、
+> 版本：0.1.7 · 本文档描述内核对外暴露的全部接口：配置、同步/异步 SDK、核心数据类型、
 > 引擎契约与 88 个 Agent 工具。工具契约以 JSON-Schema 形式生成（`tool_list()`），本文档为
 > 人类可读的完整参考。
 
@@ -48,7 +48,7 @@
 
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `engine` | string | `"mock"` | `mock` / `bundled` / `chromium` / `cef` / `webview` / `webkit` / `auto` |
+| `engine` | string | `"mock"` | `mock` / `bundled` / `chromium` / `system` / `cef` / `webview` / `webkit` / `auto` |
 | `rendering_mode` | string | `"headless"` | `"hosted"`（托管/有窗口）或 `"headless"`（离屏） |
 | `profile_name` | string | `"default"` | Profile 名，多账号隔离 |
 | `incognito` | bool | `false` | 无痕：关闭不落盘 cookie/storage |
@@ -67,6 +67,12 @@
 | `network_ask_permission` | bool | `false` | 移动端网络访问先询问宿主 |
 | `auto_accept_dialogs` | bool | `true` | 自动接受无必要弹窗/下载 |
 | `isolated_profiles` | bool | `false` | 每 Profile 独立 CDP BrowserContext |
+| `browser_path` | string? | `null` | 系统/默认浏览器可执行文件（最高优先；等价 `CHROME_PATH`） |
+| `prefer_headless` | bool | `true` | 以无头启动真实浏览器（仅 `rendering_mode:"hosted"` 时显示窗口） |
+| `use_default_browser` | bool | `true` | 允许 `auto`/`system` 使用平台默认浏览器（仅 CDP-capable） |
+| `use_user_profile` | bool | `false` | 复用默认浏览器的真实 profile（默认用隔离临时 profile） |
+| `remote_debug_port` | u16 | `0` | 启动浏览器的远程调试端口（`0` = 自动空闲端口） |
+| `allow_fallback_mock` | bool | `true` | `auto` 可回退 mock（始终经 `degraded`+`hint` 上报；置 `false` 则报错） |
 
 ---
 

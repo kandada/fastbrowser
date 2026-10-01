@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-10
+
+- Version aligned with the kernel (`0.1.7`).
+- `auto` never silently falls back to `mock`: it also tries a **system/default
+  browser** (`engine:"system"`), and reports `engine_used` / `degraded` /
+  `fallback_reason` / `hint` via `status()` / `get_info()`.
+
 ## [0.1.6] - 2026-09
 
 - Version aligned with the kernel (`0.1.6`).

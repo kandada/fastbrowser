@@ -1,6 +1,6 @@
 {
   "name": "fastbrowser-node",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Node.js binding for the fastbrowser browser-automation kernel (N-API over C ABI)",
   "main": "index.js",
   "scripts": {

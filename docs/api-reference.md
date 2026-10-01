@@ -1,6 +1,6 @@
 # fastbrowser API Reference
 
-> Version 0.1.6 · This document describes every interface the kernel exposes: configuration,
+> Version 0.1.7 · This document describes every interface the kernel exposes: configuration,
 > sync/async SDKs, core data types, the engine contract, and all 88 Agent tools.
 
 ## 1. Overview
@@ -32,7 +32,7 @@ Host app / bindings
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `engine` | string | `"mock"` | `mock` / `bundled` / `chromium` / `cef` / `webview` / `webkit` / `auto` |
+| `engine` | string | `"mock"` | `mock` / `bundled` / `chromium` / `system` / `cef` / `webview` / `webkit` / `auto` |
 | `rendering_mode` | string | `"headless"` | `"hosted"` (windowed) or `"headless"` (offscreen) |
 | `profile_name` | string | `"default"` | Profile name for multi-account isolation |
 | `incognito` | bool | `false` | Don't persist cookies/storage on exit |
@@ -51,6 +51,12 @@ Host app / bindings
 | `network_ask_permission` | bool | `false` | Ask host before network access (mobile) |
 | `auto_accept_dialogs` | bool | `true` | Auto-accept dialogs/downloads |
 | `isolated_profiles` | bool | `false` | Per-profile CDP BrowserContext |
+| `browser_path` | string? | `null` | System/default browser exe (highest priority; equivalent to `CHROME_PATH`) |
+| `prefer_headless` | bool | `true` | Launch a real browser headless (a window is shown only when `rendering_mode:"hosted"`) |
+| `use_default_browser` | bool | `true` | Let `auto`/`system` use the platform default browser (CDP-capable only) |
+| `use_user_profile` | bool | `false` | Reuse the default browser's real profile (default: isolated temp profile) |
+| `remote_debug_port` | u16 | `0` | Remote debugging port for a launched browser (`0` = free port) |
+| `allow_fallback_mock` | bool | `true` | `auto` may fall back to `mock` (always reported via `degraded`+`hint`; set `false` to fail) |
 
 ## 3. Sync SDK: Fastbrowser
 

@@ -29,7 +29,7 @@ AI agents need to *see* and *operate* web pages. Instead of a thin CDP wrapper, 
 
 ```toml
 [dependencies]
-fastbrowser = "0.1.6"
+fastbrowser = "0.1.7"
 ```
 
 ## Quick Start
@@ -225,7 +225,11 @@ the web page and the host OS.
 
 ## Engines
 
-`Config.engine`: `mock` (default, in-memory reference) / `bundled` (vendored Chromium) / `chromium` (external Chrome/Edge via `cdp_url`) / `cef` (desktop CEF embedding, windowless) / `webview` / `webkit` (system WebView bridge) / `auto` (degradation chain).
+`Config.engine`: `mock` (default, in-memory reference) / `bundled` (vendored Chromium) / `chromium` (external Chrome/Edge via `cdp_url`) / `system` (system/default Chrome/Edge/Chromium, launched for you) / `cef` (desktop CEF embedding, windowless) / `webview` / `webkit` (system WebView bridge) / `auto` (degradation chain).
+
+### `auto` degradation & fallback
+
+`auto` tries, in order: external `cdp_url` → `bundled` → **`system`** (the platform default browser, or a well-known Chrome/Edge/Chromium install — only CDP-capable browsers) → host `webview` → `mock`. The selected engine is **always reported**: `status()` / `get_info()` carry `engine_requested`, `engine_used`, `degraded`, and, when it degraded, `fallback_reason` + a `hint` (also printed by the CLI to stderr). A fallback to `mock` is **never silent** — set `Config.allow_fallback_mock = false` to fail instead. Real browsers launch **headless with an isolated temp profile** by default (set `rendering_mode:"hosted"` for a window; `use_user_profile:true` to reuse the real profile). Point `Config.browser_path` / `CHROME_PATH` at any Chrome/Chromium (e.g. `playwright install chromium`).
 
 ### Desktop: bundled Chromium
 
@@ -249,7 +253,7 @@ Set `Config.isolated_profiles = true` to give each `Profile` its own isolated br
 
 ```rust
 pub struct Config {
-    pub engine: String,                    // mock / bundled / chromium / cef / webview / auto
+    pub engine: String,                    // mock / bundled / chromium / system / cef / webview / auto
     pub rendering_mode: RenderingMode,     // Headless / Hosted
     pub profile_name: String,              // multi-account isolation
     pub incognito: bool,                   // no cookie/storage persistence on exit
@@ -320,7 +324,7 @@ cargo test --features engine-cdp --test bundled_chromium_integration      # vend
 
 ```
 src/engine/       BrowserEngine trait + types (no platform deps)
-src/engines/      mock / bundled / chromium(cdp) / cef / webview
+src/engines/      mock / bundled / chromium(cdp) / system / cef / webview
 src/cdp/          CDP client + endpoint discovery
 src/tools/        90+ Agent tools (14 domains, JSON-Schema params)
 src/session/      Profile / Cookie / Storage / persistence + BrowserContext isolation

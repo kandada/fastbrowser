@@ -2,7 +2,7 @@
 # 默认 feature（engine-mock）下仅需 serde/serde_json/base64/flate2。
 [package]
 name = "fastbrowser"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 
 [lib]
