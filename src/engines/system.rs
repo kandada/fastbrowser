@@ -218,8 +218,12 @@ fn desktop_exec(env: &dyn SystemEnv, desktop_name: &str) -> Option<String> {
         ));
     }
     for d in dirs {
-        let path = PathBuf::from(d).join(desktop_name);
-        if let Some(content) = env.read(&path) {
+        // Build with '/' explicitly: `.desktop` files live on Linux, and
+        // `PathBuf::join` would use '\' on (non-Linux) CI hosts, so the path we
+        // ask the env to read would not match its POSIX key.
+        let joined = format!("{d}/{desktop_name}");
+        let path = Path::new(&joined);
+        if let Some(content) = env.read(path) {
             if let Some(exec) = content
                 .lines()
                 .find_map(|line| line.trim().strip_prefix("Exec=").map(|s| s.to_string()))
@@ -238,9 +242,10 @@ fn resolve_exec(env: &dyn SystemEnv, exec: &str) -> Option<PathBuf> {
         .split_whitespace()
         .find(|t| !t.starts_with('%'))?
         .trim_matches('"');
-    let p = PathBuf::from(first);
-    if p.is_absolute() {
-        return Some(p);
+    // POSIX absolute (a leading '/') is treated as absolute on every host, so
+    // the `.desktop` resolution works identically in cross-OS tests.
+    if first.starts_with('/') || PathBuf::from(first).is_absolute() {
+        return Some(PathBuf::from(first));
     }
     env.run("which", &[first]).map(PathBuf::from)
 }
