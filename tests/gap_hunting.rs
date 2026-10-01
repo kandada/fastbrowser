@@ -489,6 +489,9 @@ fn engine_auto_falls_back_to_mock_without_cdp() {
     let s = Fastbrowser::new();
     s.init(Config {
         engine: "auto".into(),
+        // Keep this deterministic (no real browser launched in CI): the
+        // system/default-browser tier is disabled here.
+        use_default_browser: false,
         ..Config::default()
     })
     .unwrap();

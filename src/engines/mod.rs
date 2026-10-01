@@ -502,7 +502,11 @@ mod tests {
         } else {
             "mock"
         };
-        let e = ok(create_engine(&cfg("auto"), None));
+        // Disable the system/default-browser tier so this test stays focused on
+        // bundled → mock (a system Chrome would otherwise be launched).
+        let mut c = cfg("auto");
+        c.use_default_browser = false;
+        let e = ok(create_engine(&c, None));
         assert_eq!(e.name(), expect);
     }
 
@@ -512,6 +516,7 @@ mod tests {
         let _lease = acquire_chrome_lease();
         let mut c = cfg("auto");
         c.cdp_url = Some("ws://127.0.0.1:1/devtools/browser/x".into()); // 端口 1 通常关闭
+        c.use_default_browser = false; // keep this test on bundled → mock
         let expect = if bundled_present() {
             "chromium"
         } else {
@@ -525,6 +530,10 @@ mod tests {
     fn auto_with_webview_ops() {
         let _g = BUNDLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _lease = acquire_chrome_lease();
+        // Disable the system/default-browser tier (a system Chrome/Edge would
+        // otherwise be launched and the engine would be `chromium`).
+        let mut c = cfg("auto");
+        c.use_default_browser = false;
         #[cfg(feature = "engine-webview")]
         {
             // bundled 优先于 webview；无 bundled 时用 webview
@@ -533,7 +542,7 @@ mod tests {
             } else {
                 "webview"
             };
-            let e = ok(create_engine(&cfg("auto"), ops()));
+            let e = ok(create_engine(&c, ops()));
             assert_eq!(e.name(), expect);
         }
         #[cfg(not(feature = "engine-webview"))]
@@ -543,7 +552,7 @@ mod tests {
             } else {
                 "mock"
             };
-            let e = ok(create_engine(&cfg("auto"), None));
+            let e = ok(create_engine(&c, None));
             assert_eq!(e.name(), expect);
         }
     }
