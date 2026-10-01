@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-09
+
+- `get_accessibility_tree` is now pruned by default: noise nodes filtered,
+  node/depth/text caps, geometry omitted (it was ~80% of the payload), a single
+  representation (no more `tree` + `root` duplication) and a hard char budget.
+  New parameters (`max_depth`, `interesting_only`, `max_text_len`,
+  `include_geometry`, `detail`, `view`, `max_chars`) opt back into the full tree.
+  Engine geometry is only fetched when requested (`accessibility_tree_opts`).
+- `navigate` also reports a silently-ignored load for `file://` / `ftp://`
+  (previously only http(s)): landing on `about:blank` or staying on the previous
+  page after waiting is no longer a false `ok: true`.
+
+## [0.1.5] - 2026-09
+
+- Accessibility / native surface: `surface-*` features and the `ax_*` tools
+  (macOS `AXUIElement`, Linux AT-SPI, Windows UIA, Android `AccessibilityService`
+  via the C ABI `FbSurfaceOps`).
+- Shared selector dialect for `find_elements` / `click` / `type`: `role=` with
+  `[name/exact/checked/disabled/expanded/selected/level]` filters,
+  `label=` / `placeholder=` / `alt=` / `title=` / `value=` / `href=` / `ref=`,
+  `>>` chaining, and Testing-Library / Playwright-MCP tool aliases.
+
 ## [0.1.4] - 2026-09
 
 - `download` tool: fetch a URL straight to an absolute host path, byte-for-byte

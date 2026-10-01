@@ -48,6 +48,28 @@ fn norm_url(u: &str) -> String {
     }
 }
 
+/// Whether `navigate` completed but the page did NOT actually move: after
+/// waiting, the live URL (normalized) is still the previous URL, the requested
+/// URL is different, and no error page is shown — i.e. the navigation was
+/// silently ignored (e.g. an unreachable host, or a `file://` path the WebView
+/// refuses to load, leaving `about:blank`).
+///
+/// Applies to schemes whose navigation is expected to change the URL
+/// (`http`/`https`/`file`/`ftp`). `about:`/`data:`/`blob:` are excluded because
+/// navigating to them need not move off the current URL, which would otherwise
+/// produce false positives.
+fn is_stale_navigation(requested: &str, pre_url: &str, live_url: &str, is_error: bool) -> bool {
+    let changes_url = requested.starts_with("http://")
+        || requested.starts_with("https://")
+        || requested.starts_with("file://")
+        || requested.starts_with("ftp://");
+    !is_error
+        && changes_url
+        && !pre_url.is_empty()
+        && norm_url(live_url) == norm_url(pre_url)
+        && norm_url(requested) != norm_url(live_url)
+}
+
 fn navigate() -> Tool {
     Tool::new(
         "navigate",
@@ -146,12 +168,7 @@ fn navigate() -> Tool {
             // benign difference (trailing slash, case, fragment, default port)
             // — e.g. navigating to `https://example.com` while already on
             // `https://example.com/` — is not misreported as a failed load.
-            let requested_is_http = url.starts_with("http://") || url.starts_with("https://");
-            let stale = !is_error
-                && requested_is_http
-                && !pre_url.is_empty()
-                && norm_url(&live_url) == norm_url(&pre_url)
-                && norm_url(&url) != norm_url(&live_url);
+            let stale = is_stale_navigation(&url, &pre_url, &live_url, is_error);
             if is_error || stale {
                 out["ok"] = json!(false);
                 out["error"] = json!(format!(
@@ -372,6 +389,55 @@ mod tests {
         );
         // genuinely different pages
         assert_ne!(norm_url("https://e.com/a"), norm_url("https://e.com/b"));
+    }
+
+    #[test]
+    fn stale_navigation_detects_silently_ignored_loads() {
+        // http: still on the previous page after waiting.
+        assert!(is_stale_navigation(
+            "https://a.com",
+            "https://prev.com",
+            "https://prev.com",
+            false
+        ));
+        // file://: refused load leaves the tab on about:blank (the reported bug
+        // — previously only http(s) were checked, so this was a false `ok:true`).
+        assert!(is_stale_navigation(
+            "file:///projects/Test1/a11y.html",
+            "about:blank",
+            "about:blank",
+            false
+        ));
+        // file:// that did load → not stale.
+        assert!(!is_stale_navigation(
+            "file:///a/b.html",
+            "about:blank",
+            "file:///a/b.html",
+            false
+        ));
+        // successful http navigation → not stale.
+        assert!(!is_stale_navigation(
+            "https://a.com",
+            "https://prev.com",
+            "https://a.com",
+            false
+        ));
+        // error page is reported separately (is_error), not as "stale".
+        assert!(!is_stale_navigation(
+            "https://a.com",
+            "about:blank",
+            "chrome-error://x",
+            true
+        ));
+        // re-navigating to about:blank is legitimate → excluded.
+        assert!(!is_stale_navigation(
+            "about:blank",
+            "about:blank",
+            "about:blank",
+            false
+        ));
+        // no previous URL → cannot judge.
+        assert!(!is_stale_navigation("file:///x", "", "about:blank", false));
     }
 
     #[test]

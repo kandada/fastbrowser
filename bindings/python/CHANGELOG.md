@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-09
+
+- Version aligned with the kernel (`0.1.6`).
+- `get_accessibility_tree` is pruned by default (no geometry, node/depth/text
+  caps, single representation, char budget) with opt-in parameters for the full
+  tree; `navigate` no longer reports a false `ok` for a silently-ignored
+  `file://` load.
+
+## [0.1.5] - 2026-09
+
+- Version aligned with the kernel (`0.1.5`).
+- Accessibility / native-surface and selector-dialect support from the kernel.
+
 ## [0.1.4] - 2026-09
 
 - Version aligned with the kernel (`0.1.4`).

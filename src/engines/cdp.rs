@@ -1304,6 +1304,7 @@ impl ChromiumCdpEngine {
 
 impl ChromiumCdpEngine {
     /// 递归收集 AX 节点；`ignored` 节点下钻（其子节点拼接给父级）。
+    #[allow(clippy::too_many_arguments)]
     fn ax_collect(
         &self,
         sid: &str,
@@ -1312,6 +1313,7 @@ impl ChromiumCdpEngine {
         counter: &mut usize,
         geo_counter: &mut usize,
         flat: &mut Vec<Value>,
+        include_geometry: bool,
     ) -> Vec<Value> {
         if *counter >= AX_NODE_CAP {
             return Vec::new();
@@ -1325,7 +1327,15 @@ impl ChromiumCdpEngine {
         if let Some(child_ids) = node.get("childIds").and_then(Value::as_array) {
             for cid in child_ids {
                 if let Some(c) = cid.as_str() {
-                    children.extend(self.ax_collect(sid, c, by_id, counter, geo_counter, flat));
+                    children.extend(self.ax_collect(
+                        sid,
+                        c,
+                        by_id,
+                        counter,
+                        geo_counter,
+                        flat,
+                        include_geometry,
+                    ));
                 }
             }
         }
@@ -1348,9 +1358,10 @@ impl ChromiumCdpEngine {
         let role = text("role");
         let name = text("name");
         let backend_id = node.get("backendDOMNodeId").and_then(Value::as_i64);
-        // Each geometry lookup is a CDP round-trip; only resolve it for
-        // meaningful nodes (named / role-bearing), not every generic container.
-        let want_geo = !role.is_empty() || !name.is_empty();
+        // Each geometry lookup is a CDP round-trip; only resolve it when the
+        // caller asked for it (`include_geometry`) AND the node is meaningful
+        // (named / role-bearing), not every generic container.
+        let want_geo = include_geometry && (!role.is_empty() || !name.is_empty());
         let geometry = match backend_id {
             Some(bid) if want_geo && *geo_counter < AX_GEO_BUDGET => {
                 let g = self.ax_geometry(sid, bid);
@@ -2936,6 +2947,12 @@ impl BrowserEngine for ChromiumCdpEngine {
     // 几何来自 `DOM.getBoxModel(backendNodeId)`，用于把 AX 节点关联到屏幕坐标
     // （`BrowserSurface` 的 AX 快照/坐标动作依赖它）。
     fn accessibility_tree(&self, tab: TabId) -> Result<Value> {
+        // Geometry is required by the surface path (coordinate actions), so the
+        // plain call keeps it.
+        self.accessibility_tree_opts(tab, true)
+    }
+
+    fn accessibility_tree_opts(&self, tab: TabId, include_geometry: bool) -> Result<Value> {
         let sid = self.session(tab)?.to_string();
         let _ = self
             .cdp
@@ -2969,7 +2986,17 @@ impl BrowserEngine for ChromiumCdpEngine {
         let mut flat: Vec<Value> = Vec::new();
         let root = root_id
             .as_deref()
-            .map(|id| self.ax_collect(&sid, id, &by_id, &mut counter, &mut geo_counter, &mut flat))
+            .map(|id| {
+                self.ax_collect(
+                    &sid,
+                    id,
+                    &by_id,
+                    &mut counter,
+                    &mut geo_counter,
+                    &mut flat,
+                    include_geometry,
+                )
+            })
             .and_then(|mut v| {
                 if v.len() == 1 {
                     Some(v.remove(0))

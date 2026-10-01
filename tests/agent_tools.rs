@@ -183,14 +183,21 @@ fn accessibility_tree_mock() {
     let s = sdk_open("https://example.com/login");
     let v = s.tool_call("get_accessibility_tree", json!({})).unwrap();
     assert!(v["count"].as_u64().unwrap() >= 3);
-    let roles: Vec<&str> = v["tree"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|n| n["role"].as_str())
-        .collect();
-    assert!(roles.contains(&"button"));
-    assert!(roles.contains(&"textbox"));
+    // The default view is the hierarchical `root`; walk it for roles.
+    fn walk(node: &serde_json::Value, out: &mut Vec<String>) {
+        if let Some(r) = node.get("role").and_then(|x| x.as_str()) {
+            out.push(r.to_string());
+        }
+        if let Some(kids) = node.get("children").and_then(|c| c.as_array()) {
+            for k in kids {
+                walk(k, out);
+            }
+        }
+    }
+    let mut roles: Vec<String> = Vec::new();
+    walk(&v["root"], &mut roles);
+    assert!(roles.iter().any(|r| r == "button"), "{roles:?}");
+    assert!(roles.iter().any(|r| r == "textbox"), "{roles:?}");
     // 顶层快照交互元素与树一致
     let snap = s.snapshot().unwrap();
     assert_eq!(snap.interactive.len() as u64, v["count"].as_u64().unwrap());

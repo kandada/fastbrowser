@@ -1,6 +1,6 @@
 # fastbrowser API Reference
 
-> Version 0.1.0 · This document describes every interface the kernel exposes: configuration,
+> Version 0.1.6 · This document describes every interface the kernel exposes: configuration,
 > sync/async SDKs, core data types, the engine contract, and all 88 Agent tools.
 
 ## 1. Overview

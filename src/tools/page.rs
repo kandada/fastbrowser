@@ -344,6 +344,13 @@ fn get_performance_metrics() -> Tool {
 
 /// Default node cap when `max_nodes` is omitted (keeps the payload small).
 const DEFAULT_AX_NODES: usize = 300;
+/// Default tree-depth cap (0 = unlimited).
+const DEFAULT_AX_DEPTH: usize = 12;
+/// Default per-text-field cap for name/value/description.
+const DEFAULT_AX_TEXT_LEN: usize = 200;
+/// Default hard cap on the serialized payload (chars); a safety net against
+/// explosion. 0 = unlimited.
+const DEFAULT_AX_CHARS: usize = 20_000;
 
 /// Recursively drop pure-noise nodes: no role, no name, no value, and no
 /// surviving children. Returns `None` when the whole subtree is noise.
@@ -433,72 +440,282 @@ fn prune_ax_node(node: &Value, budget: &mut usize) -> Option<Value> {
     Some(out)
 }
 
+/// Clamp tree depth to `max` (1-based; `0` = unlimited).
+fn clamp_ax_depth(node: &Value, depth: usize, max: usize) -> Value {
+    let mut out = node.clone();
+    let kids = node.get("children").and_then(|c| c.as_array());
+    if let (Some(obj), Some(kids)) = (out.as_object_mut(), kids) {
+        if max != 0 && depth >= max {
+            obj.remove("children");
+        } else {
+            let kept: Vec<Value> = kids
+                .iter()
+                .map(|k| clamp_ax_depth(k, depth + 1, max))
+                .collect();
+            if kept.is_empty() {
+                obj.remove("children");
+            } else {
+                obj.insert("children".to_string(), Value::Array(kept));
+            }
+        }
+    }
+    out
+}
+
+fn truncate_text(s: &str, max: usize) -> String {
+    if max == 0 || s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max).collect();
+        format!("{head}…")
+    }
+}
+
+/// Round geometry floats to 1 decimal so a node box is ~20 chars, not ~90.
+fn round_geometry(g: &Value) -> Value {
+    match g.as_object() {
+        Some(o) => {
+            let mut m = serde_json::Map::new();
+            for (k, v) in o {
+                if let Some(f) = v.as_f64() {
+                    m.insert(k.clone(), json!((f * 10.0).round() / 10.0));
+                } else {
+                    m.insert(k.clone(), v.clone());
+                }
+            }
+            Value::Object(m)
+        }
+        None => g.clone(),
+    }
+}
+
+/// Build the lean, LLM-facing node: drop empty fields, truncate text; include
+/// geometry only when asked; include description/props/backend_id only in
+/// `full` detail.
+fn compact_ax_node(node: &Value, include_geometry: bool, full: bool, max_text_len: usize) -> Value {
+    let mut m = serde_json::Map::new();
+    let s = |k: &str| node.get(k).and_then(Value::as_str).unwrap_or("");
+    for key in ["role", "name", "value"] {
+        let v = s(key);
+        if !v.is_empty() {
+            m.insert(key.to_string(), json!(truncate_text(v, max_text_len)));
+        }
+    }
+    if full {
+        let d = s("description");
+        if !d.is_empty() {
+            m.insert(
+                "description".to_string(),
+                json!(truncate_text(d, max_text_len)),
+            );
+        }
+        if let Some(p) = node.get("props") {
+            if !p.is_null() {
+                m.insert("props".to_string(), p.clone());
+            }
+        }
+        if let Some(b) = node.get("backend_id") {
+            if !b.is_null() {
+                m.insert("backend_id".to_string(), b.clone());
+            }
+        }
+    }
+    if include_geometry {
+        if let Some(g) = node.get("geometry") {
+            if !g.is_null() {
+                m.insert("geometry".to_string(), round_geometry(g));
+            }
+        }
+    }
+    if let Some(kids) = node.get("children").and_then(|c| c.as_array()) {
+        let kept: Vec<Value> = kids
+            .iter()
+            .map(|k| compact_ax_node(k, include_geometry, full, max_text_len))
+            .collect();
+        if !kept.is_empty() {
+            m.insert("children".to_string(), Value::Array(kept));
+        }
+    }
+    Value::Object(m)
+}
+
+fn ax_flatten(node: &Value, out: &mut Vec<Value>) {
+    let mut n = node.clone();
+    if let Some(o) = n.as_object_mut() {
+        o.remove("children");
+    }
+    out.push(n);
+    if let Some(kids) = node.get("children").and_then(|c| c.as_array()) {
+        for k in kids {
+            ax_flatten(k, out);
+        }
+    }
+}
+
+fn ax_render_text(node: &Value, depth: usize, out: &mut String) {
+    let s = |k: &str| node.get(k).and_then(Value::as_str).unwrap_or("");
+    let role = s("role");
+    let name = s("name");
+    let value = s("value");
+    out.push_str(&"  ".repeat(depth));
+    out.push_str(if role.is_empty() { "text" } else { role });
+    if !name.is_empty() {
+        out.push_str(&format!(" \"{name}\""));
+    }
+    if !value.is_empty() {
+        out.push_str(&format!(" = \"{value}\""));
+    }
+    out.push('\n');
+    if let Some(kids) = node.get("children").and_then(|c| c.as_array()) {
+        for k in kids {
+            ax_render_text(k, depth + 1, out);
+        }
+    }
+}
+
+/// Shrink a compact tree until its JSON fits `cap` chars (`0` = unlimited).
+fn fit_ax_chars(mut tree: Value, cap: usize) -> Value {
+    if cap == 0 || tree.is_null() {
+        return tree;
+    }
+    let mut guard = 0;
+    while serde_json::to_string(&tree).map(|s| s.len()).unwrap_or(0) > cap && guard < 32 {
+        let n = count_ax_nodes(&tree);
+        if n <= 1 {
+            break;
+        }
+        let mut budget = (n * 4 / 5).max(1);
+        tree = prune_ax_node(&tree, &mut budget).unwrap_or(Value::Null);
+        guard += 1;
+    }
+    tree
+}
+
 fn get_accessibility_tree() -> Tool {
     Tool::new(
         "get_accessibility_tree",
-        "Return an accessibility tree of the page (role/name/state), the LLM-native perception format. Falls back to interactive elements when the engine lacks AX support. Optional 'max_nodes' caps the node count.",
-        json!({"max_nodes": {"type": "integer", "required": false}, "maxNodes": {"type": "integer", "required": false}, "limit": {"type": "integer", "required": false}}),
+        "Return an accessibility tree of the page (role/name/state), the LLM-native \
+         perception format. Pruned by default (noise filtered; node/depth/text caps; \
+         geometry omitted) to bound tokens. Use detail=\"full\" + include_geometry=true \
+         + max_nodes=0 for the complete tree. 'view' selects shape (tree|flat|text). \
+         Falls back to interactive elements when the engine lacks AX support.",
+        json!({
+            "max_nodes": {"type": "integer", "required": false, "description": "Max nodes (0 = unlimited). Default 300."},
+            "max_depth": {"type": "integer", "required": false, "description": "Max tree depth (0 = unlimited). Default 12."},
+            "interesting_only": {"type": "boolean", "required": false, "description": "Drop role-less/empty containers (default true)."},
+            "max_text_len": {"type": "integer", "required": false, "description": "Max chars per name/value/description (default 200; 0 = unlimited)."},
+            "include_geometry": {"type": "boolean", "required": false, "description": "Include node geometry (default false; only needed for coordinate actions)."},
+            "detail": {"type": "string", "enum": ["compact", "full"], "required": false, "description": "compact (default) keeps role/name/value; full adds description/props/backend_id."},
+            "view": {"type": "string", "enum": ["tree", "flat", "text"], "required": false, "description": "Output shape (default tree)."},
+            "max_chars": {"type": "integer", "required": false, "description": "Hard cap on serialized output chars (default 20000; 0 = unlimited)."}
+        }),
         r#"{"max_nodes": 300}"#,
         |ctx| {
             let tab = ctx.target_tab()?;
-            // Default to a small cap so an omitted `max_nodes` can't dump a
-            // 100s-of-KB tree; `max_nodes: 0` explicitly means "no cap".
-            let max = ctx
+            let max_nodes = ctx
                 .param_opt::<usize>("max_nodes")?
                 .or(ctx.param_opt::<usize>("maxNodes")?)
                 .or(ctx.param_opt::<usize>("limit")?)
                 .unwrap_or(DEFAULT_AX_NODES);
-            // Prefer the engine's AX tree (CDP Accessibility.getFullAXTree).
-            if let Ok(v) = ctx.runtime.engine().accessibility_tree(tab) {
-                let mut obj = v;
-                // Drop pure-noise nodes for parity with the surface path.
-                // Keep the engine's `count` (total before filtering); expose the
-                // post-filter count as `returned`.
-                if let Some(root) = obj.get("root").cloned() {
-                    if !root.is_null() {
-                        if let Some(filtered) = filter_ax_node(&root) {
-                            obj["returned"] = json!(count_ax_nodes(&filtered));
-                            obj["root"] = json!(filtered);
-                        }
-                    }
+            let max_depth = ctx
+                .param_opt::<usize>("max_depth")?
+                .or(ctx.param_opt::<usize>("maxDepth")?)
+                .unwrap_or(DEFAULT_AX_DEPTH);
+            let interesting_only = ctx.param_opt::<bool>("interesting_only")?.unwrap_or(true);
+            let max_text_len = ctx
+                .param_opt::<usize>("max_text_len")?
+                .unwrap_or(DEFAULT_AX_TEXT_LEN);
+            let include_geometry = ctx.param_opt::<bool>("include_geometry")?.unwrap_or(false);
+            let full = matches!(ctx.param_opt::<String>("detail")?.as_deref(), Some("full"));
+            let view = ctx
+                .param_opt::<String>("view")?
+                .unwrap_or_else(|| "tree".to_string());
+            let max_chars = ctx
+                .param_opt::<usize>("max_chars")?
+                .unwrap_or(DEFAULT_AX_CHARS);
+
+            // Prefer the engine's AX tree (CDP Accessibility.getFullAXTree);
+            // geometry is only fetched when `include_geometry` (perf).
+            if let Ok(v) = ctx
+                .runtime
+                .engine()
+                .accessibility_tree_opts(tab, include_geometry)
+            {
+                let obj = v;
+                let count = obj.get("count").and_then(Value::as_u64).unwrap_or(0);
+                let engine_truncated = obj
+                    .get("truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let root = obj.get("root").cloned().unwrap_or(Value::Null);
+                if root.is_null() {
+                    return Ok(obj);
                 }
-                if max > 0 {
-                    if let Some(root) = obj.get("root").cloned() {
-                        if !root.is_null() {
-                            let mut budget = max;
-                            let pruned = prune_ax_node(&root, &mut budget).unwrap_or(Value::Null);
-                            obj["root"] = pruned;
-                            obj["returned"] = json!(max - budget);
-                            obj["truncated"] = json!(budget == 0);
-                        }
-                    }
-                    // Cap the flat arrays too (CDP returns both `tree` and `root`).
-                    for key in ["nodes", "tree"] {
-                        if let Some(arr) = obj.get(key).and_then(|a| a.as_array()) {
-                            if arr.len() > max {
-                                obj[key] = json!(arr.iter().take(max).cloned().collect::<Vec<_>>());
-                                obj["truncated"] = json!(true);
-                            }
-                        }
-                    }
+                // 1) drop pure-noise nodes; 2) depth cap; 3) node cap.
+                let mut tree = if interesting_only {
+                    filter_ax_node(&root).unwrap_or(Value::Null)
+                } else {
+                    root
+                };
+                if !tree.is_null() && max_depth != 0 {
+                    tree = clamp_ax_depth(&tree, 1, max_depth);
                 }
-                // Flag a low-quality (role-less, per-character) tree so the
-                // agent prefers `ax_snapshot` instead of trusting low signal.
-                if let Some(root) = obj.get("root").cloned() {
-                    if !root.is_null() {
-                        let mut acc = (0usize, 0usize, 0usize);
-                        ax_quality(&root, &mut acc);
-                        let (total, roleless, charname) = acc;
-                        if total >= 20 && roleless * 2 > total && charname * 2 > total {
-                            obj["quality"] = json!("low");
-                            obj["hint"] = json!(
-                                "engine AX here is role-less/per-character (low signal); \
-                                 prefer `ax_snapshot` for role/name/state perception"
-                            );
-                        }
-                    }
+                if !tree.is_null() && max_nodes != 0 {
+                    let mut budget = max_nodes;
+                    tree = prune_ax_node(&tree, &mut budget).unwrap_or(Value::Null);
                 }
-                return Ok(obj);
+                // 4) lean fields; 5) hard char budget.
+                let mut tree = if tree.is_null() {
+                    Value::Null
+                } else {
+                    compact_ax_node(&tree, include_geometry, full, max_text_len)
+                };
+                tree = fit_ax_chars(tree, max_chars);
+
+                // Low-quality (role-less, per-character) probe on the result.
+                let mut low = false;
+                if !tree.is_null() {
+                    let mut acc = (0usize, 0usize, 0usize);
+                    ax_quality(&tree, &mut acc);
+                    let (total, roleless, charname) = acc;
+                    low = total >= 20 && roleless * 2 > total && charname * 2 > total;
+                }
+
+                let returned = if tree.is_null() {
+                    0
+                } else {
+                    count_ax_nodes(&tree)
+                };
+                let mut out = json!({
+                    "count": count,
+                    "returned": returned,
+                    "truncated": engine_truncated,
+                });
+                match view.as_str() {
+                    "flat" => {
+                        let mut arr = Vec::new();
+                        if !tree.is_null() {
+                            ax_flatten(&tree, &mut arr);
+                        }
+                        out["nodes"] = json!(arr);
+                    }
+                    "text" => {
+                        let mut s = String::new();
+                        if !tree.is_null() {
+                            ax_render_text(&tree, 0, &mut s);
+                        }
+                        out["text"] = json!(s);
+                    }
+                    _ => out["root"] = tree,
+                }
+                if low {
+                    out["quality"] = json!("low");
+                    out["hint"] = json!(
+                        "engine AX here is role-less/per-character (low signal); \
+                         prefer `ax_snapshot` for role/name/state perception"
+                    );
+                }
+                return Ok(out);
             }
             // Fallback: interactive elements from the snapshot.
             let snap = ctx.runtime.engine().snapshot(tab)?;
@@ -521,12 +738,17 @@ fn get_accessibility_tree() -> Tool {
                 })
                 .collect();
             let total = all.len();
-            let nodes: Vec<Value> = if max > 0 {
-                all.into_iter().take(max).collect()
+            let nodes: Vec<Value> = if max_nodes > 0 {
+                all.into_iter().take(max_nodes).collect()
             } else {
                 all
             };
-            Ok(json!({"tree": nodes, "count": total, "fallback": true, "truncated": max > 0 && total > max}))
+            Ok(json!({
+                "tree": nodes,
+                "count": total,
+                "fallback": true,
+                "truncated": max_nodes > 0 && total > max_nodes
+            }))
         },
     )
 }
@@ -820,7 +1042,60 @@ mod tests {
         let r = runtime();
         let v = call(&get_accessibility_tree(), &r, json!({})).unwrap();
         assert!(v["count"].as_u64().unwrap() >= 1);
-        assert!(v["tree"][0]["role"].is_string());
+        // Default view is the hierarchical `root` (mock root role = "webarea").
+        assert!(v["root"]["role"].is_string(), "{v}");
+    }
+
+    #[test]
+    fn accessibility_tree_view_and_geometry_controls() {
+        let r = runtime();
+        // Default: hierarchical `root`, geometry omitted even though the mock
+        // engine attaches geometry to every node.
+        let v = call(&get_accessibility_tree(), &r, json!({})).unwrap();
+        assert!(v["root"].is_object(), "{v}");
+        assert!(
+            !serde_json::to_string(&v["root"])
+                .unwrap()
+                .contains("geometry"),
+            "geometry must be omitted by default: {v}"
+        );
+        // include_geometry=true → geometry present.
+        let v = call(
+            &get_accessibility_tree(),
+            &r,
+            json!({"include_geometry": true}),
+        )
+        .unwrap();
+        assert!(
+            serde_json::to_string(&v["root"])
+                .unwrap()
+                .contains("\"geometry\""),
+            "{v}"
+        );
+        // flat view → `nodes` array.
+        let v = call(&get_accessibility_tree(), &r, json!({"view": "flat"})).unwrap();
+        assert!(v["nodes"].as_array().is_some_and(|a| !a.is_empty()), "{v}");
+        // text view → indented string (root role = webarea).
+        let v = call(&get_accessibility_tree(), &r, json!({"view": "text"})).unwrap();
+        assert!(v["text"].as_str().unwrap().contains("webarea"), "{v}");
+        // detail=full adds props/backend_id.
+        let v = call(&get_accessibility_tree(), &r, json!({"detail": "full"})).unwrap();
+        assert!(
+            serde_json::to_string(&v["root"])
+                .unwrap()
+                .contains("backend_id"),
+            "{v}"
+        );
+    }
+
+    #[test]
+    fn accessibility_tree_char_budget_bounds_output() {
+        let r = runtime();
+        let v = call(&get_accessibility_tree(), &r, json!({"max_chars": 200})).unwrap();
+        assert!(
+            serde_json::to_string(&v).unwrap().len() <= 400,
+            "max_chars must bound the payload: {v}"
+        );
     }
 
     #[test]
@@ -897,5 +1172,105 @@ mod tests {
         assert_eq!(acc2.0, 2);
         assert_eq!(acc2.1, 0, "no role-less nodes");
         assert_eq!(acc2.2, 0, "no single-char names");
+    }
+
+    #[test]
+    fn compact_ax_node_drops_geometry_and_rounds_when_kept() {
+        let node = json!({
+            "role": "button", "name": "Go", "value": "", "description": "",
+            "props": {"x": 1}, "backend_id": 7,
+            "geometry": {"x": 1.23456789, "y": 2.987654321, "width": 10.5, "height": 20.0},
+            "children": []
+        });
+        // Default (compact, no geometry): heavy fields dropped entirely.
+        let lean = compact_ax_node(&node, false, false, 200);
+        let s = serde_json::to_string(&lean).unwrap();
+        assert!(!s.contains("geometry"), "{s}");
+        assert!(!s.contains("props"), "{s}");
+        assert!(!s.contains("backend_id"), "{s}");
+        assert_eq!(lean["role"], json!("button"));
+        // Geometry kept only when asked, and rounded to 1 decimal.
+        let geo = compact_ax_node(&node, true, false, 200);
+        assert_eq!(geo["geometry"]["x"], json!(1.2));
+        assert_eq!(geo["geometry"]["y"], json!(3.0));
+        // Text truncation.
+        let long = json!({"role": "text", "name": "z".repeat(50)});
+        let cut = compact_ax_node(&long, false, false, 10);
+        assert!(cut["name"].as_str().unwrap().chars().count() <= 11);
+    }
+
+    #[test]
+    fn ax_big_tree_is_bounded_by_default_but_full_available() {
+        // Synthetic deep/wide tree with heavy full-precision geometry.
+        fn build(depth: usize, breadth: usize) -> Value {
+            let kids: Vec<Value> = (0..breadth)
+                .map(|i| {
+                    if depth == 0 {
+                        json!({
+                            "role": "StaticText",
+                            "name": format!("item {i}"),
+                            "geometry": {"x": 1.23456789, "y": 2.3456789, "width": 3.0, "height": 4.0},
+                            "children": []
+                        })
+                    } else {
+                        build(depth - 1, breadth)
+                    }
+                })
+                .collect();
+            json!({
+                "role": "generic", "name": "",
+                "geometry": {"x": 9.87654321, "y": 8.7654321, "width": 1.0, "height": 1.0},
+                "children": kids
+            })
+        }
+        let tree = build(3, 6); // ~1500 nodes
+
+        // Default pipeline: filter → compact (no geometry) → prune(300) → fit chars.
+        let filtered = filter_ax_node(&tree).unwrap_or(Value::Null);
+        let mut budget = DEFAULT_AX_NODES;
+        let pruned = prune_ax_node(&filtered, &mut budget).unwrap_or(Value::Null);
+        let lean = compact_ax_node(&pruned, false, false, DEFAULT_AX_TEXT_LEN);
+        let bounded = fit_ax_chars(lean, DEFAULT_AX_CHARS);
+        let bounded_s = serde_json::to_string(&bounded).unwrap();
+        assert!(
+            bounded_s.len() <= DEFAULT_AX_CHARS,
+            "default payload must be bounded: {}",
+            bounded_s.len()
+        );
+        assert!(
+            !bounded_s.contains("geometry"),
+            "geometry omitted by default"
+        );
+
+        // A tight char budget must actually shrink the payload.
+        let tight = fit_ax_chars(compact_ax_node(&pruned, false, false, 200), 500);
+        assert!(
+            serde_json::to_string(&tight).unwrap().len() <= 500,
+            "char budget honored"
+        );
+
+        // Full mode keeps geometry and can be much richer (no functionality loss).
+        let full = compact_ax_node(&filtered, true, true, 0);
+        let full_s = serde_json::to_string(&full).unwrap();
+        assert!(full_s.contains("geometry"));
+        assert!(
+            full_s.len() > bounded_s.len(),
+            "full is richer than default"
+        );
+    }
+
+    #[test]
+    fn clamp_ax_depth_limits_levels() {
+        let tree = json!({
+            "role": "a",
+            "children": [{"role": "b", "children": [{"role": "c", "children": []}]}]
+        });
+        let clamped = clamp_ax_depth(&tree, 1, 2);
+        assert_eq!(clamped["role"], json!("a"));
+        assert_eq!(clamped["children"][0]["role"], json!("b"));
+        assert!(
+            clamped["children"][0].get("children").is_none(),
+            "depth 2 keeps no grandchildren"
+        );
     }
 }

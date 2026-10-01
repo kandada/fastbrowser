@@ -186,7 +186,7 @@ const CONTRACT: &[(&str, &str, bool, &[&str])] = &[
     ("get_scroll_position", "{}", true, &["scroll"]),
     ("set_scroll_position", r#"{"y":100}"#, true, &["ok"]),
     ("get_performance_metrics", "{}", true, &["metrics"]),
-    ("get_accessibility_tree", "{}", true, &["tree", "count"]),
+    ("get_accessibility_tree", "{}", true, &["root", "count"]),
     ("get_console_logs", "{}", true, &["logs", "count"]),
     ("get_network_log", "{}", true, &["entries", "count"]),
     // ── 会话 ──

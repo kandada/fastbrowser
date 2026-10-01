@@ -10,7 +10,7 @@ capability-gated; the table shows what each engine class supports today.
 | interact (click/type/hover/scroll/…) | ✅ | ✅ | `press`/`send_keys` special keys, `hover`, `drag`, `swipe`, `click_coords` synthesise DOM events; relative `scroll` via `window.scrollBy` |
 | forms / select / check / radio | ✅ | ✅ | |
 | JS execute / XPath / inject CSS | ✅ | ✅ (gated) | `js_injection` capability |
-| a11y tree | ✅ | fallback | `max_nodes`/`maxNodes`/`limit` |
+| a11y tree | ✅ | fallback | pruned by default; `max_nodes`/`max_depth`/`interesting_only`/`max_text_len`/`include_geometry`/`detail`/`view`/`max_chars` |
 | console logs | ✅ native + buffer | injected buffer | webview installs `window.__fbConsoleLogs` (Android on `onPageStarted`, iOS document-start) |
 | storage / cookies | ✅ | ✅ (`https`) | `file://`/`data:` storage restricted by browser policy |
 | tabs / windows | ✅ | ✅ | `id` accepted as `tab` alias; titles refreshed live from `document.title` |

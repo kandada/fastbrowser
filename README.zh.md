@@ -29,7 +29,7 @@ AI Agent 需要"看得见、操作得了"网页。fastbrowser 不是简单的 CD
 
 ```toml
 [dependencies]
-fastbrowser = "0.1.0"
+fastbrowser = "0.1.6"
 ```
 
 ## 快速开始

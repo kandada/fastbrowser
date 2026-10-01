@@ -439,6 +439,17 @@ pub trait BrowserEngine: Send + Sync {
         )))
     }
 
+    /// Like [`accessibility_tree`](Self::accessibility_tree), but lets the caller
+    /// opt out of node geometry. Geometry is only needed for coordinate actions
+    /// and is the single biggest payload/perf cost (one `DOM.getBoxModel`
+    /// round-trip per node), so perception-only callers pass `false`.
+    ///
+    /// Default impl ignores the flag and delegates, so engines that don't care
+    /// (mock / webview) keep working unchanged.
+    fn accessibility_tree_opts(&self, tab: TabId, _include_geometry: bool) -> Result<Value> {
+        self.accessibility_tree(tab)
+    }
+
     // ── 隔离浏览器上下文（对应 CDP BrowserContext）──────────────
     fn create_context(&self) -> Result<ContextId> {
         Err(crate::engine::EngineError::unsupported(format!(

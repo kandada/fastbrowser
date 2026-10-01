@@ -153,15 +153,14 @@ impl crate::engine::SurfaceProvider for MockSurface {
     }
 
     async fn snapshot(&self, target: &str, opts: SnapshotOptions) -> Result<SurfaceSnapshot> {
-        let surface = self
-            .surfaces
-            .lock()
-            .unwrap()
+        let surfaces = self.surfaces.lock().unwrap();
+        let surface = surfaces
             .iter()
             .find(|s| s.id == target)
             .cloned()
-            .or_else(|| self.surfaces.lock().unwrap().first().cloned())
+            .or_else(|| surfaces.first().cloned())
             .ok_or_else(|| EngineError::new(ErrorKind::InvalidArgument, "no mock surface"))?;
+        drop(surfaces);
         let tree = self.tree.lock().unwrap().clone();
         let (root, mut meta) = prune(tree, &opts);
         meta.total_nodes = self.tree.lock().unwrap().node_count();
@@ -287,6 +286,21 @@ mod tests {
     async fn bad_ref_rejected() {
         let s = MockSurface::new();
         assert!(s.act("web:1:a", SurfaceAction::Click).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn snapshot_empty_or_unknown_target_falls_back_to_first() {
+        let s = MockSurface::new();
+        // Empty target → first surface. Regression: this used to deadlock on a
+        // non-reentrant Mutex double-lock in the `find(..).or_else(|| lock())` chain.
+        let snap = s.snapshot("", SnapshotOptions::default()).await.unwrap();
+        assert_eq!(snap.surface.id, "desktop:1");
+        // Unknown target → also falls back (exercises the `or_else` branch).
+        let snap = s
+            .snapshot("desktop:999", SnapshotOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(snap.surface.id, "desktop:1");
     }
 
     #[tokio::test]
