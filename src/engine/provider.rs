@@ -280,7 +280,11 @@ impl SurfaceRuntime {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("fastbrowser-surface")
-            .enable_time()
+            // Enable the I/O driver too: the Linux AT-SPI backend (zbus) opens a
+            // D-Bus socket, so a time-only runtime panics ("IO driver disabled")
+            // when it is used — which killed the daemon on Linux CI. `enable_all`
+            // turns on I/O + time (both features are compiled in).
+            .enable_all()
             .build()
             .map_err(|e| EngineError::new(ErrorKind::Internal, format!("surface runtime: {e}")))?;
         Ok(SurfaceRuntime {
