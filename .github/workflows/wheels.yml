@@ -63,10 +63,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: pip install maturin pytest
       - name: Build + install wheel
+        # Build with the platform surface feature so the `ax_*` tools exist —
+        # the CLI tests assert on them (`tools --mode names` must list
+        # `ax_snapshot`, etc.).
         run: |
-          maturin build --out dist
+          maturin build --features pyo3/extension-module,surface-linux --out dist
           pip install --force-reinstall dist/*.whl
       - name: Pytest
+        # Real-engine e2e needs a browser + network; run only the mock/daemon
+        # tests here (they exercise the surface/ax_* tools on the mock engine).
+        env:
+          FASTBROWSER_NO_E2E: "1"
         run: pytest -q
 
   linux:
