@@ -70,6 +70,29 @@ fn is_stale_navigation(requested: &str, pre_url: &str, live_url: &str, is_error:
         && norm_url(requested) != norm_url(live_url)
 }
 
+/// Common anti-bot / WAF interstitial titles (title-substring match). CJK kept
+/// as `\u` escapes so the source stays ASCII.
+///
+/// Deliberately high-signal only: generic strings like "Access Denied" /
+/// "403 Forbidden" are omitted because they legitimately appear as real page
+/// titles and would cause false positives. Callers can turn detection off via
+/// [`Config::detect_blocked_pages`](crate::config::Config::detect_blocked_pages).
+fn is_blocked_page(title: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        // 访问请求可能对网站造成安全威胁 / 请求已被阻断 / 安全验证 / 人机验证
+        "\u{8bbf}\u{95ee}\u{8bf7}\u{6c42}\u{53ef}\u{80fd}\u{5bf9}\u{7f51}\u{7ad9}\u{9020}\u{6210}\u{5b89}\u{5168}\u{5a01}\u{80c1}",
+        "\u{8bf7}\u{6c42}\u{5df2}\u{88ab}\u{963b}\u{65ad}",
+        "\u{5b89}\u{5168}\u{9a8c}\u{8bc1}",
+        "\u{4eba}\u{673a}\u{9a8c}\u{8bc1}",
+        // High-signal English interstitials (Cloudflare & friends).
+        "Just a moment",
+        "Attention Required",
+        "Checking your browser before accessing",
+        "Request blocked",
+    ];
+    MARKERS.iter().any(|m| title.contains(m))
+}
+
 fn navigate() -> Tool {
     Tool::new(
         "navigate",
@@ -163,17 +186,26 @@ fn navigate() -> Tool {
                 || live_title.contains("This site can")
                 || live_title.contains("can't be reached")
                 || live_title.contains("This page isn");
+            // Anti-bot / WAF interstitial (e.g. a 403 challenge page): the page
+            // "loaded", but it is not the real content — don't report success.
+            // Opt-out via `Config.detect_blocked_pages = false`.
+            let blocked = ctx.runtime.config().detect_blocked_pages && is_blocked_page(&live_title);
             // Silently-ignored navigation: still on the previous page after
             // waiting, with no error page shown. Compare *normalized* URLs so a
             // benign difference (trailing slash, case, fragment, default port)
             // — e.g. navigating to `https://example.com` while already on
             // `https://example.com/` — is not misreported as a failed load.
             let stale = is_stale_navigation(&url, &pre_url, &live_url, is_error);
-            if is_error || stale {
+            if is_error || stale || blocked {
                 out["ok"] = json!(false);
+                if blocked {
+                    out["blocked"] = json!(true);
+                }
                 out["error"] = json!(format!(
                     "navigation failed:{} (url={live_url}, title={live_title})",
-                    if stale {
+                    if blocked {
+                        " blocked by anti-bot/WAF"
+                    } else if stale {
                         " still on the previous page (host unreachable or blocked?)"
                     } else {
                         " the page could not be loaded"
@@ -291,6 +323,17 @@ mod tests {
             .create_tab("https://example.com", &TabOptions::default())
             .unwrap();
         r
+    }
+
+    #[test]
+    fn detects_block_pages() {
+        assert!(is_blocked_page(
+            "\u{60a8}\u{7684}\u{8bbf}\u{95ee}\u{8bf7}\u{6c42}\u{53ef}\u{80fd}\u{5bf9}\u{7f51}\u{7ad9}\u{9020}\u{6210}\u{5b89}\u{5168}\u{5a01}\u{80c1}\u{ff0c}\u{8bf7}\u{6c42}\u{5df2}\u{88ab}\u{963b}\u{65ad}\u{3002}"
+        ));
+        assert!(is_blocked_page("Just a moment..."));
+        assert!(is_blocked_page("Attention Required! | Cloudflare"));
+        assert!(!is_blocked_page("Example Domain"));
+        assert!(!is_blocked_page(""));
     }
 
     #[test]

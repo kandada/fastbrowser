@@ -29,7 +29,7 @@ AI agents need to *see* and *operate* web pages. Instead of a thin CDP wrapper, 
 
 ```toml
 [dependencies]
-fastbrowser = "0.1.7"
+fastbrowser = "0.1.8"
 ```
 
 ## Quick Start

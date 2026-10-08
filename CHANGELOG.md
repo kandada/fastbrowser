@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-10
+
+- `execute_js`: a **lone, whole-script** function/arrow expression passed as
+  `script` (e.g. `async () => {…}`, `x => x + 1`) is now auto-called; scripts
+  with trailing statements, or arrows inside larger expressions
+  (`xs.map(x => x)`, `asyncTask()`), are left untouched. (An uncalled arrow used
+  to evaluate to a function, which the host serialized to `null`.)
+- `download`: sends a full desktop-browser header set
+  (`Accept`/`Accept-Language`/`Sec-Fetch-*`/`sec-ch-ua*`); `Accept` stays generic
+  (`*/*`) except for image URLs (which get an image-typed Accept); new `headers`
+  object adds/overrides request headers (`Host`/`Content-Length` are ignored).
+- `navigate`: detects high-signal anti-bot/WAF interstitial titles (e.g.
+  "Just a moment", "…请求已被阻断") and reports `ok:false` + `blocked:true`;
+  disable with `Config.detect_blocked_pages = false`.
+
 ## [0.1.7] - 2026-10
 
 - Desktop/pip: `auto` no longer falls back to `mock` silently. The chain is now

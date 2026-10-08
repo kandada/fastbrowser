@@ -1,6 +1,6 @@
 # fastbrowser 接口文档（API Reference）
 
-> 版本：0.1.7 · 本文档描述内核对外暴露的全部接口：配置、同步/异步 SDK、核心数据类型、
+> 版本：0.1.8 · 本文档描述内核对外暴露的全部接口：配置、同步/异步 SDK、核心数据类型、
 > 引擎契约与 88 个 Agent 工具。工具契约以 JSON-Schema 形式生成（`tool_list()`），本文档为
 > 人类可读的完整参考。
 
@@ -73,6 +73,7 @@
 | `use_user_profile` | bool | `false` | 复用默认浏览器的真实 profile（默认用隔离临时 profile） |
 | `remote_debug_port` | u16 | `0` | 启动浏览器的远程调试端口（`0` = 自动空闲端口） |
 | `allow_fallback_mock` | bool | `true` | `auto` 可回退 mock（始终经 `degraded`+`hint` 上报；置 `false` 则报错） |
+| `detect_blocked_pages` | bool | `true` | `navigate` 将反爬/WAF 中间页标题判为 `ok:false` + `blocked:true` |
 
 ---
 

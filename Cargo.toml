@@ -1,6 +1,6 @@
 [package]
 name = "fastbrowser"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 description = "Cross-platform browser automation kernel for AI agents"
 license = "Apache-2.0"

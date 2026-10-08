@@ -63,6 +63,12 @@ pub fn call_function(f: &str) -> String {
 /// host serializes to `null` (this made `execute_js` silently return null).
 pub fn wrap_script(script: &str) -> String {
     let s = script.trim();
+    // A bare function/arrow expression is meant to be CALLED (Playwright-style),
+    // not returned. Common LLM mistake: passing `async () => {…}` as `script`
+    // (an uncalled arrow evaluates to a function → the host serializes null).
+    if looks_like_function_expr(s) {
+        return format!("({s})()");
+    }
     // Already a complete expression — most importantly a self-contained IIFE
     // like `(function(){ … return x; })()` — evaluate as-is. Wrapping it again
     // produces an outer IIFE with no `return` → undefined → null (this silently
@@ -100,6 +106,196 @@ pub fn wrap_script(script: &str) -> String {
     } else {
         script.to_string()
     }
+}
+
+/// True when `s` is a **lone, whole-script** function/arrow expression that
+/// should be invoked (Playwright-style). Deliberately conservative:
+///  - the expression must span the *entire* script (no trailing statements — so
+///    `function f(){…}\nf()` is NOT mistakenly wrapped into a syntax error);
+///  - the arrow must be at the top level (so `xs.map(x => x)` is untouched);
+///  - `async` is only stripped at a keyword boundary (so `asyncTask()` is not
+///    mangled).
+///
+/// An uncalled function expression otherwise evaluates to a function, which the
+/// host serializes to `null` — the common LLM mistake this guards against.
+fn looks_like_function_expr(s: &str) -> bool {
+    // Already invoked (`(…)()`): leave to the normal path.
+    if s.ends_with(")()") {
+        return false;
+    }
+    let t = strip_async_prefix(s).trim();
+    if t.starts_with("function") {
+        return whole_function_expr(t);
+    }
+    if let Some(idx) = top_level_arrow(t) {
+        if !arrow_head_ok(&t[..idx]) {
+            return false;
+        }
+        return whole_arrow_body(t[idx + 2..].trim());
+    }
+    false
+}
+
+/// Strip a leading `async` keyword (only at a real boundary; not `asyncTask`).
+fn strip_async_prefix(s: &str) -> &str {
+    if let Some(rest) = s.strip_prefix("async") {
+        if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace()) || rest.starts_with('(')
+        {
+            return rest.trim_start();
+        }
+    }
+    s
+}
+
+/// Arrow head validity: a parenthesised parameter list `( … )` or a single
+/// identifier `x` (Playwright-style `x => …`).
+fn arrow_head_ok(head: &str) -> bool {
+    let h = head.trim();
+    if h.starts_with('(') && h.ends_with(')') {
+        return true;
+    }
+    !h.is_empty()
+        && h.chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+/// Is `t` (starting with `function`) a whole-script function expression
+/// `function [name]? ( … ) { … }` with nothing after it?
+fn whole_function_expr(t: &str) -> bool {
+    let rest = t["function".len()..].trim_start();
+    let name_len = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .count();
+    let rest = rest[name_len..].trim_start();
+    if !rest.starts_with('(') {
+        return false;
+    }
+    let (_params, after) = match matching(rest, '(', ')') {
+        Some(x) => x,
+        None => return false,
+    };
+    let after = after.trim_start();
+    if !after.starts_with('{') {
+        return false;
+    }
+    let (_body, tail) = match matching(after, '{', '}') {
+        Some(x) => x,
+        None => return false,
+    };
+    let tail = tail.trim();
+    tail.is_empty() || tail == ";"
+}
+
+/// Is `body` (the part after `=>`) the whole remainder — a complete `{ … }`
+/// block, or a single concise expression with no top-level `;`?
+fn whole_arrow_body(body: &str) -> bool {
+    if body.starts_with('{') {
+        match matching(body, '{', '}') {
+            Some((_inner, tail)) => {
+                let tail = tail.trim();
+                tail.is_empty() || tail == ";"
+            }
+            None => false,
+        }
+    } else {
+        !body.is_empty() && !has_top_level_semicolon(body)
+    }
+}
+
+/// First `=>` at top level (outside quotes / brackets).
+fn top_level_arrow(s: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut prev_bs = false;
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if let Some(q) = quote {
+            if prev_bs {
+                prev_bs = false;
+            } else if c == '\\' {
+                prev_bs = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            '=' if depth == 0 => {
+                if matches!(chars.peek(), Some((_, '>'))) {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Is there a `;` at top level (outside quotes / brackets)?
+fn has_top_level_semicolon(s: &str) -> bool {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut prev_bs = false;
+    for c in s.chars() {
+        if let Some(q) = quote {
+            if prev_bs {
+                prev_bs = false;
+            } else if c == '\\' {
+                prev_bs = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ';' if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Given `s` starting with `open`, return the slice between the matching
+/// `open`/`close` pair and the slice after it (quote/bracket aware).
+fn matching(s: &str, open: char, close: char) -> Option<(&str, &str)> {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut prev_bs = false;
+    let mut start: Option<usize> = None;
+    for (i, c) in s.char_indices() {
+        if let Some(q) = quote {
+            if prev_bs {
+                prev_bs = false;
+            } else if c == '\\' {
+                prev_bs = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        if c == open {
+            depth += 1;
+            if start.is_none() {
+                start = Some(i + open.len_utf8());
+            }
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                let st = start?;
+                return Some((&s[st..i], &s[i + close.len_utf8()..]));
+            }
+        } else if c == '\'' || c == '"' || c == '`' {
+            quote = Some(c);
+        }
+    }
+    None
 }
 
 /// Split `s` into (before, last-statement) at the last top-level `;` or
@@ -319,6 +515,59 @@ mod tests {
         assert_eq!(wrap_script(arrow_iife), arrow_iife);
         // A bare expression that merely mentions `return` in a string stays as-is.
         assert_eq!(wrap_script("'return'"), "'return'");
+    }
+
+    #[test]
+    fn wrap_script_calls_bare_function_expression() {
+        // An uncalled arrow/function expression evaluates to a function (→ null);
+        // wrap_script should call it (common LLM mistake: `script` = `async () => {…}`).
+        assert_eq!(
+            wrap_script("async () => { return 42; }"),
+            "(async () => { return 42; })()"
+        );
+        assert_eq!(
+            wrap_script("() => document.title"),
+            "(() => document.title)()"
+        );
+        assert_eq!(
+            wrap_script("function(){ return 1; }"),
+            "(function(){ return 1; })()"
+        );
+        // Params are fine — there is nowhere else to get arguments.
+        assert_eq!(
+            wrap_script("function(a){ return a; }"),
+            "(function(a){ return a; })()"
+        );
+        assert_eq!(wrap_script("x => x + 1"), "(x => x + 1)()");
+        assert_eq!(
+            wrap_script("async () => { return 42; }"),
+            "(async () => { return 42; })()"
+        );
+        // Not a lone function expression → unchanged.
+        assert_eq!(wrap_script("[1,2].map(x => x)"), "[1,2].map(x => x)");
+        assert_eq!(wrap_script("document.title"), "document.title");
+        // `async` identifier must not be mangled.
+        assert_eq!(wrap_script("asyncTask()"), "asyncTask()");
+        assert_eq!(wrap_script("asyncify()"), "asyncify()");
+    }
+
+    #[test]
+    fn wrap_script_keeps_multi_statement_function_scripts_valid() {
+        // A script that *starts* with a function declaration but has trailing
+        // statements must NOT be wrapped as `(function … \n stmt)()` (that is a
+        // syntax error). It should go through the normal statement path.
+        let w = wrap_script("function f(){ return 1 }\nf()");
+        assert!(
+            !w.starts_with("(function f"),
+            "must not wrap a multi-statement script as a lone function expression: {w}"
+        );
+        assert!(
+            w.starts_with("(function(){"),
+            "expected statement IIFE wrapper: {w}"
+        );
+        // Concise single-expression arrow with a trailing statement is not a
+        // lone arrow either.
+        assert_eq!(wrap_script("() => 1; foo()"), "() => 1; foo()");
     }
 
     #[test]

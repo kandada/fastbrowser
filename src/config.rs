@@ -86,6 +86,11 @@ pub struct Config {
     /// `true`, but the fallback is **always reported** (`degraded` + `hint`),
     /// never silent. Set `false` to fail instead.
     pub allow_fallback_mock: bool,
+    /// `navigate` detects anti-bot / WAF interstitial pages (title heuristics
+    /// like "Just a moment", "…请求已被阻断") and reports `ok:false` +
+    /// `blocked:true`. Default `true`; set `false` if a legitimate page title
+    /// happens to match a marker.
+    pub detect_blocked_pages: bool,
     /// 电脑操作表面层配置（feature `surface` 生效）。
     #[serde(default)]
     pub surface: SurfaceConfig,
@@ -159,6 +164,7 @@ impl Default for Config {
             use_user_profile: false,
             remote_debug_port: 0,
             allow_fallback_mock: true,
+            detect_blocked_pages: true,
             surface: SurfaceConfig::default(),
         }
     }

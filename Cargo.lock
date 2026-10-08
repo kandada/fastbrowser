@@ -831,7 +831,7 @@ dependencies = [
 
 [[package]]
 name = "fastbrowser"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "accessibility",
  "accessibility-sys",

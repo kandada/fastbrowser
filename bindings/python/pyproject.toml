@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "fastbrowser"
-version = "0.1.7"
+version = "0.1.8"
 description = "Python bindings for the fastbrowser browser-automation kernel (PyO3)"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -29,6 +29,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 urls = { Repository = "https://github.com/kandada/fastbrowser", Changelog = "https://github.com/kandada/fastbrowser/blob/main/bindings/python/CHANGELOG.md" }
+
+[project.scripts]
+fastbrowser = "fastbrowser.cli:main"
 
 [tool.maturin]
 python-source = "python"

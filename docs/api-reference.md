@@ -1,6 +1,6 @@
 # fastbrowser API Reference
 
-> Version 0.1.7 · This document describes every interface the kernel exposes: configuration,
+> Version 0.1.8 · This document describes every interface the kernel exposes: configuration,
 > sync/async SDKs, core data types, the engine contract, and all 88 Agent tools.
 
 ## 1. Overview
@@ -57,6 +57,7 @@ Host app / bindings
 | `use_user_profile` | bool | `false` | Reuse the default browser's real profile (default: isolated temp profile) |
 | `remote_debug_port` | u16 | `0` | Remote debugging port for a launched browser (`0` = free port) |
 | `allow_fallback_mock` | bool | `true` | `auto` may fall back to `mock` (always reported via `degraded`+`hint`; set `false` to fail) |
+| `detect_blocked_pages` | bool | `true` | `navigate` flags anti-bot/WAF interstitial titles as `ok:false` + `blocked:true` |
 
 ## 3. Sync SDK: Fastbrowser
 

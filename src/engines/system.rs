@@ -97,19 +97,16 @@ pub fn find_system_browser_with(config: &Config, env: &dyn SystemEnv) -> Option<
     }
     // 3) platform default browser (only when CDP-capable)
     if config.use_default_browser {
-        if let Some(p) = default_browser(env) {
-            if is_cdp_capable(&p.to_string_lossy()) && env.file_exists(&p) {
-                return Some(p);
-            }
-        }
-    }
-    // 4) well-known install paths
-    for p in known_paths(env) {
-        if env.file_exists(&p) && is_cdp_capable(&p.to_string_lossy()) {
+        if let Some(p) = default_browser(env)
+            .filter(|p| is_cdp_capable(&p.to_string_lossy()) && env.file_exists(p))
+        {
             return Some(p);
         }
     }
-    None
+    // 4) well-known install paths
+    known_paths(env)
+        .into_iter()
+        .find(|p| env.file_exists(p) && is_cdp_capable(&p.to_string_lossy()))
 }
 
 /// Well-known installation paths for CDP browsers.

@@ -15,9 +15,10 @@ use std::io::Read;
 use crate::engine::{EngineError, ErrorKind};
 use crate::tools::tool::Tool;
 
-/// A desktop-browser UA. Many image/file hosts reject unknown clients.
-const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
-     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+/// A modern desktop-browser UA. Many image/file hosts (and WAFs) reject
+/// requests whose headers look non-browser.
+const BROWSER_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 pub fn tools() -> Vec<Tool> {
     vec![download()]
@@ -26,11 +27,12 @@ pub fn tools() -> Vec<Tool> {
 fn download() -> Tool {
     Tool::new(
         "download",
-        "Download a URL to a local file (binary-safe: images, PDFs, archives). 'path' must be an absolute host path. Sends a browser User-Agent and, by default, a Referer of the current tab's URL (needed by hot-link-protected hosts); override with 'referer'.",
+        "Download a URL to a local file (binary-safe: images, PDFs, archives). 'path' must be an absolute host path. Sends a full desktop-browser header set (UA/Accept/Sec-Fetch/sec-ch-ua) and, by default, a Referer of the current tab's URL (needed by hot-link-protected hosts / WAFs); override with 'referer', or add/override any header via the 'headers' object.",
         json!({
             "url": {"type": "string", "required": true},
             "path": {"type": "string", "required": true},
-            "referer": {"type": "string", "description": "Referer header; defaults to the current tab URL."}
+            "referer": {"type": "string", "description": "Referer header; defaults to the current tab URL."},
+            "headers": {"type": "object", "description": "Extra/override request headers, e.g. {\"Accept-Language\": \"zh-CN\"}."}
         }),
         r#"{"url": "https://example.com/pic.jpg", "path": "/abs/pic.jpg"}"#,
         |ctx| {
@@ -70,11 +72,46 @@ fn download() -> Tool {
                 }
             }
 
+            // Browser-like header defaults. `Accept` is only image-typed for
+            // image URLs; a generic download (PDF/zip/JSON) keeps `*/*` so
+            // non-image hosts are not content-negotiated away.
+            let url_l = url.to_ascii_lowercase();
+            let url_path = url_l.split(['?', '#']).next().unwrap_or("");
+            let is_image = [
+                ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".ico", ".svg",
+            ]
+            .iter()
+            .any(|e| url_path.ends_with(*e));
+            let accept = if is_image {
+                "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+            } else {
+                "*/*"
+            };
             let mut req = ureq::get(&url)
                 .set("User-Agent", BROWSER_UA)
-                .set("Accept", "*/*");
+                .set("Accept", accept)
+                .set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+                .set("Sec-Fetch-Dest", if is_image { "image" } else { "empty" })
+                .set("Sec-Fetch-Mode", "no-cors")
+                .set("Sec-Fetch-Site", "cross-site")
+                .set("sec-ch-ua", "\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
+                .set("sec-ch-ua-mobile", "?0")
+                .set("sec-ch-ua-platform", "\"macOS\"");
             if !referer.is_empty() {
                 req = req.set("Referer", &referer);
+            }
+            // Extra/override headers (e.g. a host-specific cookie or token).
+            // `Host`/`Content-Length` are managed by the HTTP client — allowing
+            // them to be overridden can bypass vhost checks or corrupt framing.
+            if let Some(obj) = ctx.params.get("headers").and_then(|v| v.as_object()) {
+                for (k, v) in obj {
+                    if k.eq_ignore_ascii_case("host") || k.eq_ignore_ascii_case("content-length") {
+                        continue;
+                    }
+                    if let Some(vs) = v.as_str() {
+                        req = req.set(k, vs);
+                    }
+                }
             }
 
             let resp = match req.call() {
@@ -200,6 +237,65 @@ mod tests {
             "request was: {req}"
         );
         assert!(req.contains("Mozilla/5.0"), "request was: {req}");
+        // Full browser header set (WAFs reject requests missing Sec-Fetch/sec-ch-ua).
+        let low = req.to_lowercase();
+        assert!(low.contains("sec-fetch-dest: image"), "request was: {req}");
+        assert!(low.contains("sec-ch-ua"), "request was: {req}");
+        assert!(low.contains("accept-language"), "request was: {req}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_non_image_uses_generic_accept_and_ignores_host() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen2 = seen.clone();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let n = std::io::Read::read(&mut sock, &mut buf).unwrap_or(0);
+                *seen2.lock().unwrap_or_else(|e| e.into_inner()) =
+                    String::from_utf8_lossy(&buf[..n]).to_string();
+                let _ = sock.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
+                );
+            }
+        });
+
+        let r = Runtime::new(
+            Box::new(crate::engines::mock::MockEngine::new()),
+            Config::default(),
+        );
+        let dir = std::env::temp_dir().join(format!("fb_dl_pdf_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("doc.pdf");
+        let out = download()
+            .run(&ToolContext {
+                runtime: &r,
+                params: json!({
+                    "url": format!("http://127.0.0.1:{port}/doc.pdf"),
+                    "path": path.to_string_lossy(),
+                    "headers": {"Cookie": "a=1", "Host": "evil.example"}
+                }),
+            })
+            .unwrap();
+        assert_eq!(out["ok"], true, "{out}");
+        let req = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let low = req.to_lowercase();
+        assert!(
+            low.contains("accept: */*"),
+            "non-image download must use a generic Accept: {req}"
+        );
+        assert!(low.contains("sec-fetch-dest: empty"), "{req}");
+        assert!(
+            !low.contains("evil.example"),
+            "Host header override must be ignored: {req}"
+        );
+        assert!(
+            low.contains("cookie: a=1"),
+            "custom header should be sent: {req}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

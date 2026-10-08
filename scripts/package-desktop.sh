@@ -75,8 +75,8 @@ case "$PLATFORM" in
   <key>CFBundleName</key><string>$APP_NAME</string>
   <key>CFBundleDisplayName</key><string>$APP_NAME</string>
   <key>CFBundleIdentifier</key><string>com.fastbrowser.app</string>
-  <key>CFBundleVersion</key><string>0.1.7</string>
-  <key>CFBundleShortVersionString</key><string>0.1.7</string>
+  <key>CFBundleVersion</key><string>0.1.8</string>
+  <key>CFBundleShortVersionString</key><string>0.1.8</string>
   <key>CFBundleExecutable</key><string>fastbrowser</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>

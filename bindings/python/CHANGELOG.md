@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-10
+
+- Version aligned with the kernel (`0.1.8`).
+- **CLI**: `python -m fastbrowser <cmd>` (and the `fastbrowser` console script).
+  - Ephemeral one-shots: `tools` / `fetch` / `run --steps` / `download`.
+  - Stateful **daemon** (auto-started; `serve` / `daemon start|stop|status`)
+    that keeps one browser alive so cookies/tabs/page persist across separate
+    CLI invocations. Listens on **both** a Unix socket and a loopback TCP port;
+    clients auto-detect via a discovery file (`~/.fastbrowser/daemon.json`).
+  - Accessibility: `ax list` / `ax snapshot` / `ax act`.
+  - `execute_js`: a bare function/arrow expression passed as `script`
+    (e.g. `async () => {…}`) is now auto-called (it used to evaluate to a
+    function → `null`).
+- `download`: sends a full desktop-browser header set
+  (`Accept`/`Accept-Language`/`Sec-Fetch-*`/`sec-ch-ua*`) and accepts a custom
+  `headers` object — needed to pass hot-link/WAF-protected hosts.
+- `navigate`: detects anti-bot/WAF interstitial pages (e.g. "Just a moment",
+  "…请求已被阻断") and reports `ok:false` + `blocked:true` instead of success.
+
 ## [0.1.7] - 2026-10
 
 - Version aligned with the kernel (`0.1.7`).
