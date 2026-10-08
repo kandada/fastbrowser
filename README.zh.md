@@ -29,7 +29,7 @@ AI Agent 需要"看得见、操作得了"网页。fastbrowser 不是简单的 CD
 
 ```toml
 [dependencies]
-fastbrowser = "0.1.8"
+fastbrowser = "0.1.9"
 ```
 
 ## 快速开始
@@ -219,6 +219,21 @@ sdk.clear_audit();
 > `ax_*` 仅在以 `surface*` feature 构建时存在。macOS/Linux/Windows 原生后端需要
 > 系统无障碍授权/会话；Android 需用户在系统设置中开启本 App 的
 > AccessibilityService。详见 `docs/surface.md`。
+
+### 感知与 token 成本
+
+感知是**有界**的，且**最优表示取决于页面形态**：
+
+- `snapshot` **按视口分页、硬上限 `a..z`（约 26 个元素）**，带滚动元信息——
+  链接密集页是分页读取而非整树 dump。要更紧凑、无几何的文本视图，用
+  `snapshot text`（CLI）/ `Fastbrowser.snapshot_text()` → `[id] role "text" -> href`
+  （`[id]` 即可用于 click/type 的快照引用）。
+- `get_accessibility_tree` 默认已裁剪（无几何、节点/深度/文本上限、单一表示、
+  字节预算）；`view:"text"` 最省。链接密集页还会返回 `link_density` 与 `hint`
+  （逐节点 role/name 基本是在重复链接文本）。
+- 链接很多时优先 `extract_links`（去重）/ `get_page_text`，而不是整棵树。
+  （见 issue #1：a11y 相对 raw HTML 的压缩比取决于页面形态——在"几乎全是链接"
+  的页面上会接近甚至超过 1.0。）
 
 ## 引擎
 

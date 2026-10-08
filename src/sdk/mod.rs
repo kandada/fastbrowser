@@ -225,6 +225,12 @@ impl Fastbrowser {
         self.with_runtime_ok(|rt| rt.engine().snapshot(tab))
     }
 
+    /// 当前页快照的**紧凑文本视图**（无 JSON/几何；链接密集页更省 token）。
+    /// `[id]` 即快照引用，可直接用于 click/type。
+    pub fn snapshot_text(&self) -> Result<String> {
+        Ok(self.snapshot()?.to_llm_text_compact())
+    }
+
     /// 当前页截图。
     pub fn screenshot(&self) -> Result<Image> {
         let tab = self.ensure_tab()?;

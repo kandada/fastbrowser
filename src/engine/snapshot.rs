@@ -355,6 +355,36 @@ impl PageSnapshot {
         }
         out
     }
+
+    /// Compact, JSON-free, geometry-free text view: one line per interactive
+    /// element (`[id] role "text" -> href`). On link-dense pages this is far
+    /// cheaper than serializing the whole [`PageSnapshot`] while staying
+    /// actionable (the `[id]` is the snapshot reference). Additive: the default
+    /// `snapshot` JSON is unchanged.
+    pub fn to_llm_text_compact(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("title: {}\nurl: {}\n", self.title, self.url));
+        for e in &self.interactive {
+            let role = e.role.as_deref().unwrap_or(&e.tag);
+            let text = e.text.as_deref().unwrap_or("").trim();
+            let href = e.href.as_deref().unwrap_or("");
+            out.push('[');
+            out.push(e.id);
+            out.push_str("] ");
+            out.push_str(role);
+            if !text.is_empty() {
+                out.push_str(" \"");
+                out.push_str(text);
+                out.push('"');
+            }
+            if !href.is_empty() {
+                out.push_str(" -> ");
+                out.push_str(href);
+            }
+            out.push('\n');
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -393,6 +423,42 @@ mod tests {
         let s = sample();
         assert!(s.element_by_id('a').is_some());
         assert!(s.element_by_id('z').is_none());
+    }
+
+    #[test]
+    fn compact_text_view_is_cheaper_than_json() {
+        let mut s = sample();
+        s.interactive = (0..26)
+            .map(|i| InteractiveElement {
+                id: (b'a' + i) as char,
+                tag: "a".into(),
+                role: Some("link".into()),
+                text: Some(format!("Link number {i}")),
+                href: Some(format!("https://example.com/p/{i}")),
+                rect: Rect::new(i as f64, i as f64, 100.0, 20.0),
+                refs: vec![],
+                attrs: HashMap::new(),
+                value: None,
+                input_type: None,
+                checked: None,
+                selectable_options: None,
+                selected_option: None,
+                visible: true,
+            })
+            .collect();
+        let json_n = serde_json::to_string(&s).unwrap().len();
+        let text = s.to_llm_text_compact();
+        assert!(
+            text.len() < json_n,
+            "compact text ({}) should be < json ({json_n})",
+            text.len()
+        );
+        assert!(
+            text.contains("[a] link \"Link number 0\" -> https://example.com/p/0"),
+            "{text}"
+        );
+        // Geometry must not leak into the compact view.
+        assert!(!text.contains("Rect"), "{text}");
     }
 
     #[test]

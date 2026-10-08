@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-10
+
+- Token-efficient perception: a new compact, geometry-free snapshot text view
+  (`Fastbrowser::snapshot_text()`; CLI `snapshot text` / `snapshot --format text`)
+  → `[id] role "text" -> href`, where `[id]` is still an actionable snapshot ref.
+  The default `snapshot` JSON is unchanged.
+- `get_accessibility_tree` reports `link_density` + a `hint` on link-dense pages
+  (a per-node role/name tree mostly echoes link text → prefer `extract_links` /
+  `get_page_text` / `view:"text"`). Its default byte budget still caps even
+  `detail:"full"` unless `max_chars:0` is passed explicitly.
+- Fix: the surface runtime now enables the tokio **I/O** driver (`enable_all`),
+  so the Linux AT-SPI backend (zbus) no longer panics on connect — it fails
+  gracefully and is reported as a skipped provider instead of taking down the
+  process/daemon.
+
 ## [0.1.8] - 2026-10
 
 - `execute_js`: a **lone, whole-script** function/arrow expression passed as

@@ -386,6 +386,20 @@ fn count_ax_nodes(node: &Value) -> usize {
         .unwrap_or(0)
 }
 
+/// Count `(total, links)` in a nested AX tree (used for the link-density hint).
+fn count_ax_links(node: &Value) -> (usize, usize) {
+    let is_link = node.get("role").and_then(Value::as_str) == Some("link");
+    let (mut total, mut links) = (1usize, is_link as usize);
+    if let Some(kids) = node.get("children").and_then(|c| c.as_array()) {
+        for k in kids {
+            let (t, l) = count_ax_links(k);
+            total += t;
+            links += l;
+        }
+    }
+    (total, links)
+}
+
 /// Quality probe for a nested AX tree: `(total, roleless, single_char_names)`.
 /// A tree that is mostly role-less single-character nodes indicates a
 /// glyph-per-node AX source (older Android WebView host AX), where
@@ -672,6 +686,15 @@ fn get_accessibility_tree() -> Tool {
                 };
                 tree = fit_ax_chars(tree, max_chars);
 
+                // Link-dense probe: a per-node role/name tree on a mostly-links
+                // page mostly repeats the link text, so other representations are
+                // usually cheaper (see the `hint` below).
+                let (ax_total, ax_links) = if tree.is_null() {
+                    (0usize, 0usize)
+                } else {
+                    count_ax_links(&tree)
+                };
+
                 // Low-quality (role-less, per-character) probe on the result.
                 let mut low = false;
                 if !tree.is_null() {
@@ -713,6 +736,14 @@ fn get_accessibility_tree() -> Tool {
                     out["hint"] = json!(
                         "engine AX here is role-less/per-character (low signal); \
                          prefer `ax_snapshot` for role/name/state perception"
+                    );
+                } else if ax_total >= 30 && ax_links * 2 > ax_total {
+                    // Link-dense: the tree echoes link text per node.
+                    out["link_density"] = json!(ax_links as f64 / ax_total as f64);
+                    out["hint"] = json!(
+                        "link-dense page: the per-node role/name tree mostly repeats \
+                         link text; `extract_links` / `get_page_text` / view=\"text\" \
+                         are usually cheaper than the full tree"
                     );
                 }
                 return Ok(out);
@@ -1127,6 +1158,57 @@ mod tests {
         let t =
             json!({"role":"root","children":[{"role":"a"},{"role":"b","children":[{"role":"c"}]}]});
         assert_eq!(count_ax_nodes(&t), 4);
+    }
+
+    #[test]
+    fn count_ax_links_counts_links() {
+        let t = json!({
+            "role": "generic",
+            "children": [
+                {"role": "link", "name": "a"},
+                {"role": "link", "name": "b"},
+                {"role": "button", "name": "c"}
+            ]
+        });
+        assert_eq!(count_ax_links(&t), (4, 2));
+    }
+
+    #[test]
+    fn full_mode_is_still_char_bounded_by_default() {
+        // Even `detail:full` output is byte-capped by the default `max_chars`
+        // unless the caller explicitly lifts it (`max_chars: 0`).
+        fn build(depth: usize, breadth: usize) -> Value {
+            let kids: Vec<Value> = (0..breadth)
+                .map(|i| {
+                    if depth == 0 {
+                        json!({
+                            "role": "StaticText",
+                            "name": format!("item {i}"),
+                            "geometry": {"x": 1.23456789, "y": 2.3456789, "width": 3.0, "height": 4.0},
+                            "children": []
+                        })
+                    } else {
+                        build(depth - 1, breadth)
+                    }
+                })
+                .collect();
+            json!({
+                "role": "generic", "name": "",
+                "geometry": {"x": 9.87654321, "y": 8.7654321, "width": 1.0, "height": 1.0},
+                "children": kids
+            })
+        }
+        let tree = build(3, 6); // ~1500 nodes
+        let full = compact_ax_node(&tree, true, true, 0);
+        assert!(
+            serde_json::to_string(&full).unwrap().len() > DEFAULT_AX_CHARS,
+            "full mode can exceed the default budget when uncapped"
+        );
+        let bounded = fit_ax_chars(compact_ax_node(&tree, true, true, 0), DEFAULT_AX_CHARS);
+        assert!(
+            serde_json::to_string(&bounded).unwrap().len() <= DEFAULT_AX_CHARS,
+            "full mode must still be capped by default max_chars"
+        );
     }
 
     #[test]

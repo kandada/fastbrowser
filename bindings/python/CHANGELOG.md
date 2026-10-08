@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-10
+
+- Version aligned with the kernel (`0.1.9`).
+- New `Fastbrowser.snapshot_text()`: compact, geometry-free snapshot text
+  (`[id] role "text" -> href`) — much cheaper than the JSON snapshot on
+  link-dense pages; the default `snapshot()` JSON is unchanged.
+- `get_accessibility_tree` reports `link_density` + a `hint` on link-dense pages.
+
 ## [0.1.8] - 2026-10
 
 - Version aligned with the kernel (`0.1.8`).

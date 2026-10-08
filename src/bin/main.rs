@@ -453,9 +453,20 @@ fn dispatch(sdk: &Fastbrowser, cmd: &str, args: &[String]) -> fastbrowser::engin
         "reload" => simple!("reload"),
         "stop" => simple!("stop"),
 
-        "snapshot" => sdk
-            .snapshot()
-            .map(|s| serde_json::to_value(s).unwrap_or(Value::Null)),
+        // `snapshot text` (or `snapshot --format text`) returns the compact,
+        // geometry-free text view; the default stays the full JSON snapshot.
+        "snapshot" => {
+            let a0 = args.first().map(String::as_str);
+            let want_text = matches!(a0, Some("text" | "--text" | "compact"))
+                || (a0 == Some("--format") && args.get(1).map(String::as_str) == Some("text"));
+            if want_text {
+                Ok(json!(sdk.snapshot_text()?))
+            } else {
+                sdk.snapshot()
+                    .map(|s| serde_json::to_value(s).unwrap_or(Value::Null))
+            }
+        }
+        "snapshot_text" | "snapshot_compact" => Ok(json!(sdk.snapshot_text()?)),
         "get_page_title" => simple!("get_page_title"),
         "get_current_url" => simple!("get_current_url"),
         "get_page_text" => simple!("get_page_text"),

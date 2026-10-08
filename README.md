@@ -29,7 +29,7 @@ AI agents need to *see* and *operate* web pages. Instead of a thin CDP wrapper, 
 
 ```toml
 [dependencies]
-fastbrowser = "0.1.8"
+fastbrowser = "0.1.9"
 ```
 
 ## Quick Start
@@ -222,6 +222,22 @@ the web page and the host OS.
 > macOS/Linux/Windows backends need the OS accessibility permission/session;
 > Android requires the user to enable the app's AccessibilityService. See
 > `docs/surface.md`.
+
+### Token-efficient perception
+
+Perception is bounded and the best representation is **page-shape dependent**:
+
+- `snapshot` is **viewport-scoped and capped** (`a..z` ≈ 26 elements) with scroll
+  metadata — a link-dense page is paginated, not dumped. For a compact,
+  geometry-free view use `snapshot text` (CLI) / `Fastbrowser.snapshot_text()`
+  → `[id] role "text" -> href` (`[id]` is the actionable snapshot reference).
+- `get_accessibility_tree` is pruned by default (no geometry, node/depth/text
+  caps, single representation, byte budget); `view:"text"` is the cheapest. On
+  link-dense pages it also emits `link_density` + a `hint` (a per-node
+  role/name tree mostly echoes link text).
+- For link-heavy pages prefer `extract_links` (deduped) / `get_page_text` over a
+  full tree. (See issue #1: the a11y-vs-HTML compression ratio depends on page
+  shape — it can approach or exceed 1.0 on pages that are mostly links.)
 
 ## Engines
 
